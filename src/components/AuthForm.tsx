@@ -21,8 +21,8 @@ export function AuthForm({ mode }: { mode: "signin" | "signup" }) {
       ? await supabase.auth.signUp({ email, password, options: { emailRedirectTo: `${window.location.origin}/app` } })
       : await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
-    if (error) return toast.error(error.message);
-    if (!data.session) return toast.success("請到信箱確認帳號 Check your email to confirm.");
+    if (error) { toast.error(error.message); return; }
+    if (!data.session) { toast.success("請到信箱確認帳號 Check your email to confirm."); return; }
     navigate({ to: "/app" });
   }
 
