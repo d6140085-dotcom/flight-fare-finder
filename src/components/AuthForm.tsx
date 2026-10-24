@@ -1,4 +1,4 @@
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "react-router";
 import { useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
@@ -23,7 +23,7 @@ export function AuthForm({ mode }: { mode: "signin" | "signup" }) {
     setLoading(false);
     if (error) { toast.error(error.message); return; }
     if (!data.session) { toast.success("請到信箱確認帳號 Check your email to confirm."); return; }
-    navigate({ to: "/app" });
+    navigate("/app");
   }
 
   return (

@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link } from "react-router";
 import { Plane } from "lucide-react";
 import type { ReactNode } from "react";
 

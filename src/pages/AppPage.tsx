@@ -1,40 +1,40 @@
-import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
+import { redirect, useLoaderData, useNavigate } from "react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import type { User } from "@supabase/supabase-js";
 import { LogOut } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/SiteHeader";
+import { usePageMeta } from "@/lib/page-meta";
 
-export const Route = createFileRoute("/app")({
-  ssr: false,
-  head: () => ({
-    meta: [
-      { title: "Dashboard — Flight Price Notifier" },
-      { name: "description", content: "Your Flight Price Notifier dashboard." },
-      { property: "og:title", content: "Dashboard — Flight Price Notifier" },
-      { property: "og:description", content: "Your fare-tracking dashboard." },
-      { property: "og:type", content: "website" },
-      { name: "twitter:card", content: "summary" },
-      { name: "robots", content: "noindex" },
-    ],
-  }),
-  beforeLoad: async () => {
-    const { data } = await supabase.auth.getUser();
-    if (!data.user) throw redirect({ to: "/signin" });
-    return { user: data.user };
-  },
-  component: AppPage,
-});
+// Runs in the browser before /app renders (replaces TanStack Router's beforeLoad).
+export async function appLoader() {
+  const { data } = await supabase.auth.getUser();
+  if (!data.user) throw redirect("/signin");
+  return { user: data.user };
+}
 
-function AppPage() {
-  const { user } = Route.useRouteContext();
+export default function AppPage() {
+  usePageMeta({
+    title: "Dashboard — Flight Price Notifier",
+    description: "Your Flight Price Notifier dashboard.",
+    tags: {
+      "og:title": "Dashboard — Flight Price Notifier",
+      "og:description": "Your fare-tracking dashboard.",
+      "og:type": "website",
+      "twitter:card": "summary",
+      robots: "noindex",
+    },
+  });
+  const { user } = useLoaderData() as { user: User };
   const navigate = useNavigate();
-  const { queryClient } = Route.useRouteContext();
+  const queryClient = useQueryClient();
 
   async function signOut() {
     await queryClient.cancelQueries();
     queryClient.clear();
     await supabase.auth.signOut();
-    navigate({ to: "/signin", replace: true });
+    navigate("/signin", { replace: true });
   }
 
   return (
