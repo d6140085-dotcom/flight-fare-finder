@@ -5,6 +5,8 @@ description: Hard rules for working with Supabase in the Flight Price Notifier c
 
 # Supabase Best Practice (Flight Price Notifier — AUTH ONLY)
 
+> **Project adaptation — `d6140085-dotcom/flight-fare-finder`.** Supabase project: `flight-price-notifier-001` (ref `ftkcnrtlgwrpvjrszidu`). Lovable is deprecated, so read every "Lovable" below as "the repo": the client is `src/integrations/supabase/client.ts`, reading `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY` (set in Vercel). Changes go on a feature branch → PR against `main`; never push to `main`. Caching Supabase values in Secrets Manager is optional, not required.
+
 > **Read this first — it changes everything below.** In this course **Supabase does exactly one job: authentication** (sign-up / sign-in / sign-out via the built-in `auth.users`). **No application data ever lives in Supabase** — every flight subscription lives in **DynamoDB on AWS**, written only by Lambdas. So the schema-migration / RPC / cross-table-query rules that dominate a *data-on-Supabase* project **do not apply here**. The rules that remain are about **keys, where-data-lives discipline, and the Lovable auth wiring** — and they matter a lot.
 
 The original rules came from a real production Lovable + Supabase project where Supabase *was* the database. We keep only what's relevant to an auth-only build. When guiding a student, **apply these proactively** — stop them before they break one.
@@ -47,7 +49,7 @@ Auth-only means almost no Supabase tooling is needed — mostly just creating th
 - M0 front-end / Lovable: publishable (anon) key only.
 - If a student pastes a `service_role` key into Lovable, the front-end, or `.env` committed to git → stop them, explain the blast radius, and have them rotate it (Supabase dashboard → Settings → API → roll).
 - Grep a deployed bundle for `service_role` → must be absent. (This is also an M3 go-live check.)
-- **Caching the *publishable* key in the `flight/supabase` Secrets Manager secret is fine** (M1 prereq) — it's public-by-design and it's only there so a new Cowork session recalls the `url`+`publishable_key` without a dashboard hunt. **Never** cache the service-role key anywhere, AWS included.
+- **Caching the *publishable* key in the `flight/supabase` Secrets Manager secret is fine** (optional in this project — the values also live in Vercel env vars and are readable through the Supabase connector) — it's public-by-design and it's only there so a new Cowork session recalls the `url`+`publishable_key` without a dashboard hunt. **Never** cache the service-role key anywhere, AWS included.
 
 ---
 

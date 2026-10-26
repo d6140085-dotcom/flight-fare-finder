@@ -1,9 +1,19 @@
 ---
 name: m0-landing-and-signin
-description: Flight Price Notifier Milestone 0 — generate the v1 landing page with Lovable, push to GitHub, set up the Cowork project + AWS/Vercel/Supabase connectors, cache the GitHub token in Secrets Manager, deploy to Vercel, and swap auth to the student's own Supabase. Use when the student says "啟動 M0", "start M0", "build the M0 landing page", "機票通知的入口網站", or any variant that maps to "先做出一個能登入的網站".
+description: Flight Price Notifier Milestone 0 — generate the v1 landing page, push to GitHub, set up AWS/Vercel/Supabase connectors, store the GitHub token in AWS (this project: SSM Parameter Store `/github/pat` behind the `github-api-bridge` Lambda), deploy to Vercel as a static Vite SPA, and use the owner's own Supabase for auth. Lovable is deprecated in this project. Use when the student says "啟動 M0", "start M0", "build the M0 landing page", "機票通知的入口網站", or any variant that maps to "先做出一個能登入的網站".
 ---
 
 # M0 — Landing Page + Sign-in（先有一個能登入的機票通知網站）
+
+> **Project adaptation — `d6140085-dotcom/flight-fare-finder` (read this first; it overrides the course text below where they conflict).**
+>
+> - **Architecture:** Claude + GitHub + Vercel + Supabase Auth + AWS. **Lovable is deprecated** for this project — it is not the generator, not the runtime, and not a sync target. Ignore Lovable instructions below; make all front-end changes in the repo.
+> - **GitHub credential:** the PAT lives in **AWS Systems Manager Parameter Store** at `/github/pat` (SecureString, region `ap-southeast-2`). It is used only *inside* the approved **`github-api-bridge`** Lambda (`ap-southeast-2`; invoke with `{"endpoint": "/..."}`). Never retrieve, print, log, or copy the token, and do **not** require or duplicate it into Secrets Manager unless the owner explicitly asks. Git pushes from Claude sessions go through the session's GitHub App access.
+> - **Git workflow:** never push to `main`. Every change goes on a feature branch → push the branch → open a PR against `main` → **do not merge it yourself**.
+> - **Supabase:** auth only, project `flight-price-notifier-001` (ref `ftkcnrtlgwrpvjrszidu`).
+> - **Hosting:** Vercel, static Vite SPA (`vite build` → `dist/`, SPA rewrite in `vercel.json`), env vars `VITE_SUPABASE_URL` + `VITE_SUPABASE_PUBLISHABLE_KEY`.
+>
+> **M0 status in this project:** Steps 1–3 are historical (Lovable produced v1 once; it is no longer used). Steps 5–9 are done: connectors installed, token in Parameter Store + Lambda bridge, Vite SPA on `main`, Vercel deploy live with deep links working, auth on the owner's own Supabase with Site URL / Redirect URLs set. Step 10 = these skills. Use `m0-landing-and-signin-checklist` to audit.
 
 ## What this skill does
 
@@ -190,6 +200,8 @@ This is where the course moves into **Cowork on Desktop** — the workbench ever
 
 ### Step 6 — Cache the GitHub token in Secrets Manager (the re-use point)
 
+> **This project:** done differently, on purpose. The token is in **SSM Parameter Store** `/github/pat` (`ap-southeast-2`) and only the **`github-api-bridge`** Lambda reads it. Verify with `ssm:DescribeParameters` (metadata only) or by invoking the bridge with `{"endpoint": "/user"}` — never `GetParameter` into the chat. Skip the Secrets Manager instructions in this step.
+
 From here on, **Claude Code itself edits the repo** (Step 7 pushes a Vite-SPA conversion to `main`; later milestones push Lambda code and config). It needs a **GitHub write token** — and you don't want to paste a fresh one into every new session. So **store it once in Secrets Manager and recall the same token every session.**
 
 **6.1 — Create a scoped GitHub PAT.**
@@ -219,11 +231,11 @@ aws secretsmanager create-secret --name flight/github \
 
 > **Why this matters — the #1 M0 deploy trap.** Lovable sometimes scaffolds a **TanStack Start / SSR** app (Cloudflare-targeted) instead of a plain Vite SPA. On Vercel that builds "successfully" but **every route 404s** (or only `/` works and `/app` 404s) — confusing because the build is green. Converting to a plain SPA **before** importing to Vercel avoids it. *(Attaching `lovable-best-practice` in Step 1 usually prevents it — but do this anyway.)*
 
-Have Claude Code apply the conversion and **push it straight to `main`**, recalling the token from the secret (no re-paste). Give it the repo + the conversion prompt:
+Have Claude Code apply the conversion and push it, recalling the token from the secret (no re-paste). **This project:** push to a feature branch and open a PR against `main`; never push to `main` directly (done — the SPA conversion is on `main`). Give it the repo + the conversion prompt:
 
 > 「GITHUB REPO: `<owner>/<repo>`.
 > Convert this project to a plain **Vite + React single-page app (SPA)** suitable for static hosting on Vercel. Remove any TanStack Start / SSR / server-side rendering and any Cloudflare/wrangler config. Use **React Router** for client-side routing (`/`, `/app`, sign-in, sign-up). The build output must be a static SPA (`vite build` → `dist/`) with a SPA fallback so deep links like `/app` resolve client-side. Keep all existing UI, auth, and styling unchanged.
-> Then **push the change to my GitHub repo, overriding the `main` branch** — recall the GitHub token from Secrets Manager to authenticate the push; don't ask me for it.」
+> Then **push the change to a feature branch and open a pull request against `main`** — don't push to `main` and don't merge the PR.」
 
 This is the **first reuse** of the cached token, and exactly what makes future sessions painless: read the github secret → push.
 
@@ -249,6 +261,8 @@ Expect `200` on **both** — if `/` is 200 but `/app` is 404, the SPA conversion
 ---
 
 ### Step 9 — Swap auth from Lovable Cloud to the student's own Supabase
+
+> **This project:** done. Auth uses `flight-price-notifier-001` (`ftkcnrtlgwrpvjrszidu`); Vercel has both `VITE_SUPABASE_*` vars; Site URL / Redirect URLs are set. There is no Lovable prompt to run — any future Supabase change is a repo change (`src/integrations/supabase/client.ts`, `.env`) on a feature branch + PR. Caching the Supabase values in Secrets Manager (📌 below) is **optional and not required** here.
 
 v1 ran on **Lovable Cloud**. Now move auth to the student's **own** Supabase project so they own the `auth.users` going into M1.1 (where `email` becomes the DynamoDB partition key).
 
@@ -325,7 +339,8 @@ Then verify M0:
 9. **Forgetting to test sign-OUT** — the loop must close; a broken sign-out hides session bugs.
 10. **Custom Supabase tables creeping in** — Supabase is auth-only, forever. App data (the `subscriptions` table) lives in DynamoDB on AWS, starting M1.1.
 11. **Don't rename the product in M0** — "Flight Price Notifier" / 「機票降價通知」 is referenced across later milestones and the email copy. Keep it consistent.
-12. **Re-pasting the GitHub token every session** — don't. It's cached in Secrets Manager (Step 6); later sessions **discover and reuse** it. If a new session asks you for a GitHub PAT, check the secrets first — it's almost certainly already there.
+12. **Re-pasting the GitHub token every session** — don't. **This project:** it is in SSM Parameter Store `/github/pat` (`ap-southeast-2`), used only through the `github-api-bridge` Lambda. If a new session wants a GitHub PAT, use the bridge — don't ask the owner for the token, don't read it into the chat, and don't copy it into Secrets Manager.
+13. **Pushing to `main`** — never in this project. Feature branch → PR against `main` → the owner merges.
 
 ## Expected duration
 
