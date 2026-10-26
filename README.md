@@ -1,5 +1,7 @@
 # Flight Fare Finder
 
+Original product spec (historical — v1 was generated with Lovable; the project has since moved to Claude + GitHub + Vercel + Supabase Auth + AWS):
+
 Prompt """ 
 (source: https://github.com/uopsdod/claude-2-flight-price-notifier/blob/m0-landing-page/.claude/skills/m0-landing-and-signin/SKILL.md)
 Build a SaaS landing page + authenticated app shell for Flight Price Notifier (機票降價通知), a product that watches popular flight routes from Taipei and emails the user when the cheapest fare drops to or below their target price — targeted at budget-driven travelers who don't care exactly when they fly, they just want a ticket under their budget.
@@ -35,25 +37,6 @@ Out of scope for this v1: route-subscription form, target-price input, fare disp
 
 """
 
-## Check the 1st version on Lovable 
-- get the lovable deployed site url (ex. https://id-preview--7fbd1aec-67cd-431d-824a-bddd53b7d2da.lovable.app/)
-- check landing page style 
-- check sign up / sign in features 
-
-## Migrate Code from Lovable to GitHub 
-- click the Github button on Lovable > add account > connect 
-- once connected, go to www.github.com > go to you account and check the project exists (ex. https://github.com/uopsdod/fast-transcript-app-63ab2f48.git)
-
-This project was built with [Lovable](https://lovable.dev).
-
-## Build with Lovable
-
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/856f3327-3aed-4a35-a91f-862e44853682).
-
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
-
 ## Development
 
 Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
@@ -62,6 +45,7 @@ Prefer working locally? You need Node.js and npm — [install with nvm](https://
 git clone <this-repository-url>
 cd <repository-name>
 npm i
+cp .env.example .env.local   # then fill in the two Supabase values
 npm run dev
 ```
 
