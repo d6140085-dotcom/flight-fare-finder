@@ -1,9 +1,13 @@
 ---
 name: lovable-best-practice
-description: Hard rules and workflow tips for working with Lovable in the Flight Price Notifier course. Use whenever a student is generating, re-rolling, or editing the M0 Lovable landing page — applies to any Lovable session in the course. Sourced from a real production Lovable + Supabase project.
+description: DEPRECATED in this project (Lovable is no longer used) — keep for history; its PII and PascalCase rules still apply to repo code. Hard rules and workflow tips for working with Lovable in the Flight Price Notifier course. Use whenever a student is generating, re-rolling, or editing the M0 Lovable landing page — applies to any Lovable session in the course. Sourced from a real production Lovable + Supabase project.
 ---
 
 # Lovable Best Practice (Flight Price Notifier)
+
+> **DEPRECATED for `d6140085-dotcom/flight-fare-finder`.** Lovable is intentionally no longer part of this project (architecture: Claude + GitHub + Vercel + Supabase Auth + AWS). Do not suggest Lovable re-rolls, Lovable prompts, Lovable's Git panel, or Lovable sync checks. Front-end changes are made directly in the repo on a feature branch → PR against `main` (never push to `main`; never merge the PR yourself).
+>
+> **Still in force as repo-wide rules:** Rule 2 (Supabase auth only), Rule 3 (no PII in code or test data — scan diffs before committing), Rule 4 (PascalCase component files). Tip 1 (Vercel preset = Vite) is already satisfied by `vercel.json`. Rule 1 and Tips 2–3 no longer apply.
 
 This skill is loaded any time the student is interacting with Lovable — which in this course is **M0** (the landing page + sign-in) and any later re-roll of the front-end. It lives at two levels:
 
