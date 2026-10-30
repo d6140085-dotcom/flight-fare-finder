@@ -15,6 +15,18 @@ Claude + GitHub + Vercel + Supabase Auth + AWS.
 - **App data (later milestones):** AWS (DynamoDB via Lambdas), not Supabase.
 - **Lovable is deprecated.** Don't suggest Lovable prompts, re-rolls or sync checks.
 
+## Code hygiene
+
+- **No PII in committed code, test data, mock users or UI copy.** Use obvious fakes
+  (`user@example.com`, `Test User`). Anything committed stays in git history even after you
+  delete it. Before committing, scan the changed files:
+  `grep -rE '@(gmail|yahoo|hotmail|outlook)\.com' .`
+  A tester's own sign-up email in Supabase `auth.users` is runtime data, not committed code, so
+  it's fine.
+- **Name hand-written React component files in PascalCase** (`AuthForm.tsx`, `SiteHeader.tsx`).
+  Hooks, utils and types keep their existing style (`use-mobile.tsx`). Generated shadcn
+  primitives in `src/components/ui/` keep the shadcn kebab-case names; don't rename them.
+
 ## GitHub credential
 
 - The PAT is in AWS SSM Parameter Store at `/github/pat` (SecureString, `ap-southeast-2`).
