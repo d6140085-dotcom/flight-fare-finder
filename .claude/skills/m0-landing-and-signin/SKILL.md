@@ -94,10 +94,10 @@ You (Claude Code) drive the student through **10 steps**, in order. Don't dump t
 There is **no separate "create a blank project" step** — that just burns a Lovable generation. Do it all in the **first** message:
 
 1. 到 https://lovable.dev/ 登入，**+ New project**.
-2. **Attach the two rule files as context** to this first prompt: `lovable-best-practice` and `supabase-best-practice`. They tell Lovable the non-negotiables up front — **Supabase is auth-only (no custom tables/RPCs)**, ship a **plain Vite SPA**, PascalCase components — so v1 obeys them on the first generation instead of you fixing them after.
+2. **Attach the two rule files as context** to this first prompt: the repo's `CLAUDE.md` and `supabase-best-practice`. They tell Lovable the non-negotiables up front — **Supabase is auth-only (no custom tables/RPCs)**, ship a **plain Vite SPA**, PascalCase components — so v1 obeys them on the first generation instead of you fixing them after.
 3. Paste the **full prompt below verbatim as that same first message** and generate. One generation → the whole landing page + auth + `/app` shell.
 
-⚠️ **Don't click Connect Supabase / Connect GitHub from inside this first generation.** The prompt tells Lovable to use its default backend (Lovable Cloud) for v1 — GitHub comes in Step 3, your own Supabase in Step 9. (Why Lovable Cloud first: [[lovable-best-practice]] Rule 1.) Re-rolls burn the free quota ([[lovable-best-practice]] Tip 2).
+⚠️ **Don't click Connect Supabase / Connect GitHub from inside this first generation.** The prompt tells Lovable to use its default backend (Lovable Cloud) for v1 — GitHub comes in Step 3, your own Supabase in Step 9. (Why Lovable Cloud first: connecting Supabase before the page exists tangles the later swap to your own project with the initial generation.) Re-rolls use up the free quota.
 
 **The full prompt (paste verbatim):**
 
@@ -229,7 +229,7 @@ aws secretsmanager create-secret --name flight/github \
 
 ### Step 7 — Convert the project to a Vite SPA + push to GitHub
 
-> **Why this matters — the #1 M0 deploy trap.** Lovable sometimes scaffolds a **TanStack Start / SSR** app (Cloudflare-targeted) instead of a plain Vite SPA. On Vercel that builds "successfully" but **every route 404s** (or only `/` works and `/app` 404s) — confusing because the build is green. Converting to a plain SPA **before** importing to Vercel avoids it. *(Attaching `lovable-best-practice` in Step 1 usually prevents it — but do this anyway.)*
+> **Why this matters — the #1 M0 deploy trap.** Lovable sometimes scaffolds a **TanStack Start / SSR** app (Cloudflare-targeted) instead of a plain Vite SPA. On Vercel that builds "successfully" but **every route 404s** (or only `/` works and `/app` 404s) — confusing because the build is green. Converting to a plain SPA **before** importing to Vercel avoids it. *(Attaching the rule files in Step 1 usually prevents it, but do this anyway.)*
 
 Have Claude Code apply the conversion and push it, recalling the token from the secret (no re-paste). **This project:** push to a feature branch and open a PR against `main`; never push to `main` directly (done — the SPA conversion is on `main`). Give it the repo + the conversion prompt:
 

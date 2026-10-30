@@ -75,7 +75,7 @@ Auth-only means almost no Supabase tooling is needed — mostly just creating th
 ## Source
 
 - Adapted from a real production Lovable + Supabase project's Supabase notes. That project used Supabase as its database, so its migration/RPC/cross-table rules were central there; **here Supabase is auth-only**, so those are dropped and only the key-hygiene + auth-wiring rules remain.
-- Related: [[lovable-best-practice]] (the M0 Lovable build), [[aws-best-practice]] (where the data actually lives — DynamoDB).
+- Related: `CLAUDE.md` (project-wide rules), [[m0-landing-and-signin]] (the M0 build), [[aws-best-practice]] (where the data actually lives — DynamoDB).
 
 ## TODO
 
