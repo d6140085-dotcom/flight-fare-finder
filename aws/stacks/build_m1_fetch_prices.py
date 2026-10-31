@@ -19,9 +19,10 @@ INLINE_LIMIT = 4096
 
 
 def source(name):
-    code = (ROOT / "lambdas" / name / "index.py").read_text()
-    if len(code) > INLINE_LIMIT:
-        sys.exit(f"{name}/index.py is {len(code)} chars; inline CFN allows {INLINE_LIMIT}")
+    code = (ROOT / "lambdas" / name / "index.py").read_text(encoding="utf-8")
+    size = max(len(code), len(code.encode("utf-8")))
+    if size > INLINE_LIMIT:
+        sys.exit(f"{name}/index.py is {size} chars/bytes; inline CFN allows {INLINE_LIMIT}")
     return code
 
 

@@ -29,3 +29,26 @@ M1 has no payment guard.
 4. Update the stack `flight-m1-fetch-prices` with that template.
 
 Routes config: edit `aws/config/flight-routes.json` and upload it to the bucket as `flight-routes.json`.
+
+## Part 1.3 — email on target
+
+| Resource | Name | Managed by |
+|---|---|---|
+| Lambda | `flight-fare-notification` (+ 30-day log group) | CloudFormation stack `flight-m1-email-on-target` |
+| SQS trigger | `flight-fare-queue` → notification, batch 5, partial-batch failures | same stack |
+| Queue setting | `VisibilityTimeout=180` (> 30 s Lambda timeout) | set directly |
+| Role policy statement | `ConsumeFareQueue` (ReceiveMessage, DeleteMessage, GetQueueAttributes) | merged into `flight-data` |
+
+Per message: query `notification_history` (`pk = "{email}#{route}"`, newest first) → send only if
+never alerted, the last alert is older than `NOTIFY_FLOOR_HOURS` (24), or the fare dropped
+≥ `REALERT_PCT` (20 %) or ≥ `REALERT_ABS_TWD` (NT$2,000) since → POST to Resend (key + `from` from
+SSM `/flight/resend`) → write the history row (`price` in TWD) only after a 2xx.
+`429`/`5xx` → that message is retried; `403`/`422` → logged (addresses masked) and dropped.
+Logs identify subscribers by a short hash, never by address.
+
+While `from` is `onboarding@resend.dev`, Resend only delivers to the Resend account's own
+address (others get `403`; `example.com` addresses get `422`). Verify a domain (M3) to email anyone else.
+
+Redeploy: `python3 aws/stacks/build_m1_email_on_target.py <account-id> > template.json`, then
+update stack `flight-m1-email-on-target`. After changing `/flight/resend`, change any env var on
+the function to force a cold start (the parameter is cached per container).

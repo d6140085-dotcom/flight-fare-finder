@@ -33,6 +33,7 @@ def _stub_boto3():
             return ("eq", self.name, value)
 
     conditions.Attr = Attr
+    conditions.Key = Attr
     sys.modules.update({"boto3": boto3, "boto3.dynamodb": dynamodb, "boto3.dynamodb.conditions": conditions})
 
 
@@ -149,6 +150,97 @@ class WrapperTests(unittest.TestCase):
         calls = w._lambda.invoke.call_args_list
         self.assertTrue(all(c.kwargs["InvocationType"] == "Event" for c in calls))
         self.assertEqual(json.loads(calls[1].kwargs["Payload"])["destination"], "SEL")
+
+
+MSG = {
+    "email": "user@example.com", "route": "TPE-TYO", "plan_name": "tokyo", "target_price": 10000,
+    "cheapest": {"price": 7634, "currency": "TWD", "airline": "TR",
+                 "depart_date": "2026-11-02T06:50:00+08:00", "return_date": "2026-11-07T22:05:00+09:00"},
+    "cheapest_usd": {"price": 234, "currency": "USD", "airline": "TR"},
+}
+NOW = datetime.datetime(2026, 10, 31, 8, 0, tzinfo=datetime.timezone.utc)
+
+
+class NotificationTests(unittest.TestCase):
+    def setUp(self):
+        self.n = _load("flight-fare-notification")
+        self.n._cfg = {"key": "re_test", "from": "onboarding@resend.dev"}
+        self.n._hist = mock.MagicMock()
+        self.n._hist.query.return_value = {"Items": []}
+        for k in ("NOTIFY_FLOOR_HOURS", "REALERT_PCT", "REALERT_ABS_TWD"):
+            os.environ.pop(k, None)
+
+    def last(self, hours_ago, price):
+        return {"sent_at": (NOW - datetime.timedelta(hours=hours_ago)).isoformat(), "price": Decimal(price)}
+
+    def test_dedup_rules(self):
+        s = self.n.should_send
+        self.assertTrue(s(None, Decimal(7634), NOW))                      # never alerted
+        self.assertFalse(s(self.last(1, 7634), Decimal(7634), NOW))      # same price inside 24h
+        self.assertTrue(s(self.last(25, 7634), Decimal(7634), NOW))      # floor elapsed
+        self.assertTrue(s(self.last(1, 10000), Decimal(8000), NOW))      # >= 20% cheaper
+        self.assertTrue(s(self.last(1, 20000), Decimal(17999), NOW))     # >= NT$2,000 cheaper
+        self.assertFalse(s(self.last(1, 9000), Decimal(8000), NOW))      # 11% / NT$1,000: not enough
+
+    def test_resend_param_shapes(self):
+        self.n._cfg = None
+        self.n._ssm = mock.MagicMock()
+        os.environ["RESEND_PARAM"] = "/flight/resend"
+        self.n._ssm.get_parameter.return_value = {"Parameter": {"Value": "re_bare"}}
+        self.assertEqual(self.n.resend_cfg(), {"key": "re_bare", "from": "onboarding@resend.dev"})
+        self.n._cfg = None
+        self.n._ssm.get_parameter.return_value = {"Parameter": {"Value": '{"api_key":"re_x","from":"A <a@example.com>"}'}}
+        self.assertEqual(self.n.resend_cfg()["from"], "A <a@example.com>")
+
+    def test_render(self):
+        subject, page, text = self.n.render(MSG)
+        self.assertEqual(subject, "✈️ 台北 → 東京 降價通知！NT$7,634 已達標")
+        self.assertIn("約 US$234", page)
+        self.assertIn("立即訂購", page)
+        self.assertIn("https://www.aviasales.com/search/TPE0211TYO0711", text)
+        no_usd = {k: v for k, v in MSG.items() if k != "cheapest_usd"}
+        self.assertNotIn("US$", self.n.render(no_usd)[1])
+
+    def _handle(self, status):
+        with mock.patch.object(self.n, "send", return_value=(status, "err")) as send:
+            out = self.n.handler({"Records": [{"messageId": "m1", "body": json.dumps(MSG)}]}, None)
+        return out, send
+
+    def test_2xx_sends_and_records(self):
+        out, send = self._handle(200)
+        self.assertEqual(out["batchItemFailures"], [])
+        item = self.n._hist.put_item.call_args.kwargs["Item"]
+        self.assertEqual(item["pk"], "user@example.com#TPE-TYO")
+        self.assertEqual(item["price"], Decimal(7634))
+        self.assertEqual(send.call_args.args[1], "user@example.com")
+
+    def test_permanent_error_dropped_without_history(self):
+        for status in (403, 422):
+            self.n._hist.put_item.reset_mock()
+            out, _ = self._handle(status)
+            self.assertEqual(out["batchItemFailures"], [])
+            self.n._hist.put_item.assert_not_called()
+
+    def test_transient_error_retried_without_history(self):
+        for status in (429, 500):
+            out, _ = self._handle(status)
+            self.assertEqual(out["batchItemFailures"], [{"itemIdentifier": "m1"}])
+        self.n._hist.put_item.assert_not_called()
+
+    def test_resend_error_text_masks_addresses(self):
+        body = b'{"message":"You can only send testing emails to your own email address (owner@example.com)."}'
+        err = urllib.error.HTTPError("https://api.resend.com/emails", 403, "Forbidden", {}, io.BytesIO(body))
+        with mock.patch.object(self.n.urllib.request, "urlopen", side_effect=err):
+            status, text = self.n.send(self.n._cfg, "user@example.com", "s", "<p>h</p>", "t")
+        self.assertEqual(status, 403)
+        self.assertNotIn("@", text)
+        self.assertIn("<email>", text)
+
+    def test_deduped_message_not_sent(self):
+        self.n._hist.query.return_value = {"Items": [{"sent_at": "2099-01-01T00:00:00+00:00", "price": Decimal(7634)}]}
+        out, send = self._handle(200)
+        send.assert_not_called()
+        self.assertEqual(out["batchItemFailures"], [])
 
 
 if __name__ == "__main__":
