@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "notes": "Curated M1.4 allowlist. type=city means an IATA metropolitan code covering several airports (TYO = NRT+HND). Add entries here to expand; the API and front end both read this file.",
+  "origins": [
+    {
+      "code": "TPE",
+      "type": "city",
+      "name_zh": "台北",
+      "name_en": "Taipei",
+      "country": "TW"
+    },
+    {
+      "code": "KHH",
+      "type": "airport",
+      "name_zh": "高雄",
+      "name_en": "Kaohsiung",
+      "country": "TW"
+    },
+    {
+      "code": "RMQ",
+      "type": "airport",
+      "name_zh": "台中",
+      "name_en": "Taichung",
+      "country": "TW"
+    }
+  ],
+  "destinations": [
+    {
+      "code": "TYO",
+      "type": "city",
+      "name_zh": "東京",
+      "name_en": "Tokyo",
+      "country": "JP"
+    },
+    {
+      "code": "OSA",
+      "type": "city",
+      "name_zh": "大阪",
+      "name_en": "Osaka",
+      "country": "JP"
+    },
+    {
+      "code": "NGO",
+      "type": "airport",
+      "name_zh": "名古屋",
+      "name_en": "Nagoya",
+      "country": "JP"
+    },
+    {
+      "code": "FUK",
+      "type": "airport",
+      "name_zh": "福岡",
+      "name_en": "Fukuoka",
+      "country": "JP"
+    },
+    {
+      "code": "OKA",
+      "type": "airport",
+      "name_zh": "沖繩",
+      "name_en": "Okinawa",
+      "country": "JP"
+    },
+    {
+      "code": "SPK",
+      "type": "city",
+      "name_zh": "札幌",
+      "name_en": "Sapporo",
+      "country": "JP"
+    },
+    {
+      "code": "KMJ",
+      "type": "airport",
+      "name_zh": "熊本",
+      "name_en": "Kumamoto",
+      "country": "JP"
+    },
+    {
+      "code": "SEL",
+      "type": "city",
+      "name_zh": "首爾",
+      "name_en": "Seoul",
+      "country": "KR"
+    },
+    {
+      "code": "PUS",
+      "type": "airport",
+      "name_zh": "釜山",
+      "name_en": "Busan",
+      "country": "KR"
+    },
+    {
+      "code": "CJU",
+      "type": "airport",
+      "name_zh": "濟州",
+      "name_en": "Jeju",
+      "country": "KR"
+    },
+    {
+      "code": "HKG",
+      "type": "airport",
+      "name_zh": "香港",
+      "name_en": "Hong Kong",
+      "country": "HK"
+    },
+    {
+      "code": "MFM",
+      "type": "airport",
+      "name_zh": "澳門",
+      "name_en": "Macau",
+      "country": "MO"
+    },
+    {
+      "code": "BKK",
+      "type": "city",
+      "name_zh": "曼谷",
+      "name_en": "Bangkok",
+      "country": "TH"
+    },
+    {
+      "code": "CNX",
+      "type": "airport",
+      "name_zh": "清邁",
+      "name_en": "Chiang Mai",
+      "country": "TH"
+    },
+    {
+      "code": "HKT",
+      "type": "airport",
+      "name_zh": "普吉",
+      "name_en": "Phuket",
+      "country": "TH"
+    },
+    {
+      "code": "SIN",
+      "type": "airport",
+      "name_zh": "新加坡",
+      "name_en": "Singapore",
+      "country": "SG"
+    },
+    {
+      "code": "KUL",
+      "type": "airport",
+      "name_zh": "吉隆坡",
+      "name_en": "Kuala Lumpur",
+      "country": "MY"
+    },
+    {
+      "code": "PEN",
+      "type": "airport",
+      "name_zh": "檳城",
+      "name_en": "Penang",
+      "country": "MY"
+    },
+    {
+      "code": "BKI",
+      "type": "airport",
+      "name_zh": "亞庇",
+      "name_en": "Kota Kinabalu",
+      "country": "MY"
+    },
+    {
+      "code": "MNL",
+      "type": "airport",
+      "name_zh": "馬尼拉",
+      "name_en": "Manila",
+      "country": "PH"
+    },
+    {
+      "code": "CEB",
+      "type": "airport",
+      "name_zh": "宿霧",
+      "name_en": "Cebu",
+      "country": "PH"
+    },
+    {
+      "code": "SGN",
+      "type": "airport",
+      "name_zh": "胡志明市",
+      "name_en": "Ho Chi Minh City",
+      "country": "VN"
+    },
+    {
+      "code": "HAN",
+      "type": "airport",
+      "name_zh": "河內",
+      "name_en": "Hanoi",
+      "country": "VN"
+    },
+    {
+      "code": "DAD",
+      "type": "airport",
+      "name_zh": "峴港",
+      "name_en": "Da Nang",
+      "country": "VN"
+    },
+    {
+      "code": "DPS",
+      "type": "airport",
+      "name_zh": "峇里島",
+      "name_en": "Bali",
+      "country": "ID"
+    }
+  ]
+}
