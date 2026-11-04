@@ -2,6 +2,8 @@
 
 Stack flight-m1-email-on-target: the flight-fare-notification Lambda (inline code = repo code),
 its log group, and the SQS trigger on flight-fare-queue (partial-batch retries).
+City and airline display names come from aws/config/names.json and are passed as the CITIES and
+AIRLINES environment variables (the inline code has no room for them).
 
 Before creating/updating with the trigger: the role must allow sqs:ReceiveMessage,
 DeleteMessage and GetQueueAttributes on the queue, the queue's VisibilityTimeout must exceed
@@ -17,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_m1_fetch_prices import REGION, source  # noqa: E402
 
 FN = "flight-fare-notification"
+NAMES = json.loads((Path(__file__).resolve().parents[1] / "config" / "names.json").read_text(encoding="utf-8"))
 
 
 def template(account):
@@ -43,6 +46,8 @@ def template(account):
                         "NOTIFY_FLOOR_HOURS": "24",
                         "REALERT_PCT": "20",
                         "REALERT_ABS_TWD": "2000",
+                        "CITIES": json.dumps(NAMES["cities"], ensure_ascii=False, separators=(",", ":")),
+                        "AIRLINES": json.dumps(NAMES["airlines"], ensure_ascii=False, separators=(",", ":")),
                     }},
                     "Code": {"ZipFile": source(FN)},
                 },

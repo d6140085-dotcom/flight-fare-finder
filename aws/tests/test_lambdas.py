@@ -169,6 +169,8 @@ class NotificationTests(unittest.TestCase):
         self.n._hist.query.return_value = {"Items": []}
         for k in ("NOTIFY_FLOOR_HOURS", "REALERT_PCT", "REALERT_ABS_TWD"):
             os.environ.pop(k, None)
+        names = json.loads((LAMBDAS.parent / "config" / "names.json").read_text(encoding="utf-8"))
+        self.n.CITY, self.n.AIRLINES = names["cities"], names["airlines"]
 
     def last(self, hours_ago, price):
         return {"sent_at": (NOW - datetime.timedelta(hours=hours_ago)).isoformat(), "price": Decimal(price)}
@@ -197,7 +199,27 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(subject, "✈️ 台北 → 東京 降價通知！NT$7,634 已達標")
         self.assertIn("約 US$234", page)
         self.assertIn("立即訂購", page)
-        self.assertIn("https://www.aviasales.com/search/TPE0211TYO0711", text)
+        self.assertIn("航空公司：酷航（TR）", text)
+        self.assertIn("去程 2026-11-02  回程 2026-11-07", text)
+        self.assertTrue(text.endswith("https://www.aviasales.com/search/TPE0211TYO07111"))
+
+    def test_booking_url_has_route_dates_and_one_adult(self):
+        self.assertEqual(self.n.booking_url(MSG), "https://www.aviasales.com/search/TPE0211TYO07111")
+        seoul = {**MSG, "route": "TPE-SEL",
+                 "cheapest": {**MSG["cheapest"], "depart_date": "2026-12-28T08:00:00+08:00", "return_date": "2027-01-03T10:00:00+09:00"}}
+        self.assertEqual(self.n.booking_url(seoul), "https://www.aviasales.com/search/TPE2812SEL03011")
+        one_way = {**MSG, "cheapest": {**MSG["cheapest"], "return_date": None}}
+        self.assertEqual(self.n.booking_url(one_way), "https://www.aviasales.com/search/TPE0211TYO1")
+
+    def test_airline_label(self):
+        peach = {**MSG, "cheapest": {**MSG["cheapest"], "airline": "MM"}}
+        self.assertIn("航空公司：樂桃航空（MM）", self.n.render(peach)[2])
+        unknown = {**MSG, "cheapest": {**MSG["cheapest"], "airline": "Q9"}}
+        text = self.n.render(unknown)[2]
+        self.assertIn("航空公司：Q9", text)
+        self.assertNotIn("（Q9）", text)
+        no_airline = {**MSG, "cheapest": {**MSG["cheapest"], "airline": None}}
+        self.assertNotIn("航空公司", self.n.render(no_airline)[2])
         no_usd = {k: v for k, v in MSG.items() if k != "cheapest_usd"}
         self.assertNotIn("US$", self.n.render(no_usd)[1])
 
@@ -252,6 +274,18 @@ class TemplateTests(unittest.TestCase):
         for name in ("Parser", "Wrapper"):
             code = t["Resources"][name]["Properties"]["Code"]["ZipFile"]
             self.assertLessEqual(max(len(code), len(code.encode())), 4096)
+
+    def test_notification_template_passes_names_and_fits_inline(self):
+        spec = importlib.util.spec_from_file_location("b13", LAMBDAS.parent / "stacks" / "build_m1_email_on_target.py")
+        b = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(b)
+        props = b.template("123456789012")["Resources"]["Notification"]["Properties"]
+        env = props["Environment"]["Variables"]
+        self.assertEqual(json.loads(env["AIRLINES"])["MM"], "樂桃航空")
+        self.assertEqual(json.loads(env["CITIES"])["TYO"], "東京")
+        self.assertLess(len(json.dumps(env, ensure_ascii=False).encode()), 4096)  # Lambda env limit 4 KB
+        code = props["Code"]["ZipFile"]
+        self.assertLessEqual(max(len(code), len(code.encode())), 4096)
 
 
 if __name__ == "__main__":

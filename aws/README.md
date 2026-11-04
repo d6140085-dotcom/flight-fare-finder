@@ -47,6 +47,21 @@ SSM `/flight/resend`) → write the history row (`price` in TWD) only after a 2x
 `429`/`5xx` → that message is retried; `403`/`422` → logged (addresses masked) and dropped.
 Logs identify subscribers by a short hash, never by address.
 
+Email content: NT$ headline (+ 約 US$ when available), target price, travel dates, and
+`航空公司：<name>（<code>）` using `aws/config/names.json` (passed as the `CITIES` / `AIRLINES`
+env vars; an unknown code is shown as the bare code). The 「立即訂購」 link is an Aviasales search:
+`https://www.aviasales.com/search/<ORIGIN><DDMM><DEST><DDMM>1` (trailing `1` = one adult, which
+Aviasales requires). The notification code sits at the 4,096-byte inline limit: add display names
+to `names.json`, not to the code.
+
+### Affiliate marker (not enabled)
+
+To earn commission, add your Travelpayouts partner ID ("marker", not a secret) as
+`?marker=<id>` on the booking link, e.g. `https://www.aviasales.com/search/TPE0212TYO09121?marker=<id>`.
+Suggested wiring: a non-secret env var `TP_MARKER` on `flight-fare-notification` (set from the
+template builder), appended only when set. The Travelpayouts API token is unrelated and must
+never appear in links. Moving the code off the inline 4,096-byte deployment is needed first.
+
 While `from` is `onboarding@resend.dev`, Resend only delivers to the Resend account's own
 address (others get `403`; `example.com` addresses get `422`). Verify a domain (M3) to email anyone else.
 
