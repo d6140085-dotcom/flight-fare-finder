@@ -7,6 +7,10 @@ Prereqs created outside this stack (Part 1.1 / Part 1.2 setup):
   role flight-lambda-role, bucket flight-config-<account>, queue flight-fare-queue,
   SSM SecureString /flight/travelpayouts.
 
+The EventBridge schedule's state is a stack parameter, ScheduleState, that defaults to DISABLED,
+so creating or updating the stack never switches the schedule on by accident. Enable it
+deliberately by passing ScheduleState=ENABLED (or with events:EnableRule).
+
 Usage: python3 aws/stacks/build_m1_fetch_prices.py <account-id> > template.json
 """
 import json
@@ -55,6 +59,14 @@ def template(account):
     return {
         "AWSTemplateFormatVersion": "2010-09-09",
         "Description": "Flight Price Notifier M1 Part 1.2: scheduled fare fetch (parser + wrapper + EventBridge)",
+        "Parameters": {
+            "ScheduleState": {
+                "Type": "String",
+                "Default": "DISABLED",
+                "AllowedValues": ["ENABLED", "DISABLED"],
+                "Description": "State of the flight-price-check schedule. Defaults to DISABLED; enable deliberately.",
+            }
+        },
         "Resources": {
             "FlightParserLogs": logs("flight-parser"),
             "FlightParserWrapperLogs": logs("flight-parser-wrapper"),
@@ -65,7 +77,7 @@ def template(account):
                 "Properties": {
                     "Name": "flight-price-check",
                     "ScheduleExpression": "rate(30 minutes)",
-                    "State": "ENABLED",
+                    "State": {"Ref": "ScheduleState"},
                     "Targets": [{"Id": "flight-parser-wrapper", "Arn": {"Fn::GetAtt": ["Wrapper", "Arn"]}}],
                 },
             },

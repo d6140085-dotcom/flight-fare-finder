@@ -151,5 +151,18 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(json.loads(calls[1].kwargs["Payload"])["destination"], "SEL")
 
 
+class TemplateTests(unittest.TestCase):
+    def test_schedule_is_disabled_unless_enabled_explicitly(self):
+        spec = importlib.util.spec_from_file_location("b12", LAMBDAS.parent / "stacks" / "build_m1_fetch_prices.py")
+        b = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(b)
+        t = b.template("123456789012")
+        self.assertEqual(t["Parameters"]["ScheduleState"]["Default"], "DISABLED")
+        self.assertEqual(t["Resources"]["Schedule"]["Properties"]["State"], {"Ref": "ScheduleState"})
+        for name in ("Parser", "Wrapper"):
+            code = t["Resources"][name]["Properties"]["Code"]["ZipFile"]
+            self.assertLessEqual(max(len(code), len(code.encode())), 4096)
+
+
 if __name__ == "__main__":
     unittest.main()

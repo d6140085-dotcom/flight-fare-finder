@@ -12,7 +12,7 @@ Region **ap-southeast-2**, account resources shared by all M1 Lambdas via the ex
 | SQS queue (SSE-SQS) | `flight-fare-queue` | created directly (Part 1.3 sets its visibility timeout) |
 | Role policy statements | `ReadRoutesConfig`, `EnqueueFareMatches`, `FanOutToParser` in `flight-data` | merged into the existing inline policy |
 | Lambdas | `flight-parser`, `flight-parser-wrapper` | CloudFormation stack `flight-m1-fetch-prices` |
-| EventBridge rule | `flight-price-check`, `rate(30 minutes)` → wrapper | same stack |
+| EventBridge rule | `flight-price-check`, `rate(30 minutes)` → wrapper; state = stack parameter `ScheduleState` (default `DISABLED`) | same stack |
 | Log groups | `/aws/lambda/flight-parser*`, 30-day retention | same stack |
 
 Flow: EventBridge → `flight-parser-wrapper` reads `flight-routes.json` → async-invokes
@@ -26,6 +26,7 @@ M1 has no payment guard.
 1. Edit `aws/lambdas/<fn>/index.py` (each must stay ≤ 4096 chars: the code is inlined).
 2. `python3 -m unittest discover -s aws/tests -v`
 3. `python3 aws/stacks/build_m1_fetch_prices.py <account-id> > template.json`
-4. Update the stack `flight-m1-fetch-prices` with that template.
+4. Update the stack `flight-m1-fetch-prices` with that template. The schedule stays **DISABLED** unless
+   you pass `ScheduleState=ENABLED`; to keep it running across an update, pass `ENABLED` explicitly.
 
 Routes config: edit `aws/config/flight-routes.json` and upload it to the bucket as `flight-routes.json`.
