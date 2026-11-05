@@ -18,8 +18,8 @@ it is a separate, approved step (Phase 1 prerequisite).
 | IAM OIDC provider `token.actions.githubusercontent.com` (audience `sts.amazonaws.com`) | Lets GitHub workflows request short-lived AWS credentials | — |
 | Role `flight-gha-plan` | Runs on PRs and `main`: validate, upload artifacts, create/describe/delete change sets. **Explicitly denied** `ExecuteChangeSet`, `CreateStack`, `UpdateStack`, `DeleteStack`. | `aws/iam/gha-plan-trust.json`, `aws/iam/gha-plan-policy.json` |
 | Role `flight-gha-deploy` | Assumable **only** by jobs in the `production` GitHub environment. Can execute an existing change set; denied from creating one or editing stacks directly. | `aws/iam/gha-deploy-trust.json`, `aws/iam/gha-deploy-policy.json` |
-| Role `flight-cfn-exec` | The CloudFormation service role. Limited to `flight-*` Lambdas, event-source mappings, HTTP APIs, `/aws/lambda/flight-*` log groups and `flight-*` rules. Denied: IAM writes, SSM reads/writes, `DeleteTable`/`UpdateTable`/`DeleteItem`, `PurgeQueue`/`DeleteQueue`. | `aws/iam/cfn-exec-trust.json`, `aws/iam/cfn-exec-policy.json` |
-| Role `flight-subscriptions-api-role` | Runtime role for the M1.4 API Lambda: `subscriptions` table only. | `aws/iam/subscriptions-api-role-*.json` |
+| Role `flight-cfn-exec` | The CloudFormation service role. Limited to `flight-*` Lambdas, event-source mappings, HTTP APIs, `/aws/lambda/flight-*` log groups and `flight-*` rules. May create (never update or delete) the `subscription_quota` table (M1.4). Denied: IAM writes, SSM reads/writes, `DeleteTable`/`UpdateTable`/`DeleteItem`, `PurgeQueue`/`DeleteQueue`. | `aws/iam/cfn-exec-trust.json`, `aws/iam/cfn-exec-policy.json` |
+| Role `flight-subscriptions-api-role` | Runtime role for the M1.4 API Lambda: `subscriptions` and `subscription_quota` tables only. | `aws/iam/subscriptions-api-role-*.json` |
 | S3 bucket `flight-artifacts-<account>` | Versioned, private, SSE, public access blocked. Holds `artifacts/<function>/<git-sha>.zip`. | — |
 | GitHub environment `production` | Required reviewer: the repository owner. Deployment branch: `main` only. | — |
 

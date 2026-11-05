@@ -86,6 +86,12 @@ the function to force a cold start (the parameter is cached per container).
 - `aws/config/subscription-policy.json`: 10 total subscription records per user, TWD target
   range, 12-month departure window.
 - `aws/reference/subscriptions_quota.py`: executable model of the strict quota protocol.
+- `aws/lambdas/flight-subscriptions-api/`: the M1.4 API (Phase 1B, **not deployed**). Package
+  with `python3 aws/scripts/package_subscriptions_api.py`; template
+  `aws/stacks/build_m14_subscriptions_api.py` (no API routes); change-set preparation
+  `aws/scripts/plan_m14_subscriptions_api.sh` (dry run by default, never executes).
+  Integration tests: `pip install -r aws/requirements-test.txt`, then the usual unittest command
+  (local server), or `aws/scripts/test_dynamodb_local.sh` (DynamoDB Local in Docker).
 - `aws/iam/`: least-privilege IAM **design** documents for GitHub Actions + OIDC deployment and
   the subscriptions API role. Not deployed.
 - Plan: `docs/m1.4-plan.md`; decisions: `docs/adr/0001-m1-4-dynamic-routes.md`;
