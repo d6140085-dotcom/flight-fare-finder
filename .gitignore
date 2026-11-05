@@ -29,3 +29,6 @@ dist
 
 # Python
 __pycache__/
+
+# Lambda build output
+aws/build/

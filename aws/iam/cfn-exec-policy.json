@@ -99,6 +99,20 @@
       }
     },
     {
+      "Sid": "QuotaTableOnly",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:DescribeContinuousBackups",
+        "dynamodb:UpdateContinuousBackups",
+        "dynamodb:TagResource",
+        "dynamodb:ListTagsOfResource",
+        "dynamodb:DescribeTimeToLive"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-southeast-2:379959319681:table/subscription_quota"
+    },
+    {
       "Sid": "ProtectDataAndIdentity",
       "Effect": "Deny",
       "Action": [

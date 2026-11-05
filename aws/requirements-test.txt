@@ -1,0 +1,4 @@
+# Test-only dependencies for the M1.4 subscriptions API integration tests (not deployed;
+# the Lambda runtime provides boto3). Install: pip install -r aws/requirements-test.txt
+boto3==1.43.124
+moto[server,dynamodb]==5.2.5
