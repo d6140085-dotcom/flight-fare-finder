@@ -1,13 +1,232 @@
 {
-  "schema_version": 1,
-  "notes": "Curated M1.4 allowlist. type=city means an IATA metropolitan code covering several airports (TYO = NRT+HND). Add entries here to expand; the API and front end both read this file.",
+  "schema_version": 2,
+  "notes": "Curated M1.4 allowlist; the API validates against this file and the front end reads it at build time. type=city is an IATA metropolitan code that searches all listed airports (TYO = NRT + HND); type=airport is a single airport. Codes verified against OpenTravelData optd_por_public.csv (2026-11-05) with aws/tools/verify_airports.py. The catalog only limits what users may subscribe to: the fare check queries subscribed route-months, never the whole catalog.",
+  "regions": [
+    {
+      "id": "asia",
+      "name_zh": "亞洲",
+      "name_en": "Asia"
+    },
+    {
+      "id": "middle_east",
+      "name_zh": "中東",
+      "name_en": "Middle East"
+    },
+    {
+      "id": "europe",
+      "name_zh": "歐洲",
+      "name_en": "Europe"
+    },
+    {
+      "id": "north_america",
+      "name_zh": "北美洲",
+      "name_en": "North America"
+    },
+    {
+      "id": "latin_america",
+      "name_zh": "中南美洲",
+      "name_en": "Central and South America"
+    },
+    {
+      "id": "australia",
+      "name_zh": "澳洲",
+      "name_en": "Australia"
+    },
+    {
+      "id": "new_zealand",
+      "name_zh": "紐西蘭",
+      "name_en": "New Zealand"
+    }
+  ],
+  "countries": {
+    "TW": {
+      "name_zh": "台灣",
+      "name_en": "Taiwan"
+    },
+    "JP": {
+      "name_zh": "日本",
+      "name_en": "Japan"
+    },
+    "KR": {
+      "name_zh": "韓國",
+      "name_en": "South Korea"
+    },
+    "HK": {
+      "name_zh": "香港",
+      "name_en": "Hong Kong"
+    },
+    "MO": {
+      "name_zh": "澳門",
+      "name_en": "Macau"
+    },
+    "TH": {
+      "name_zh": "泰國",
+      "name_en": "Thailand"
+    },
+    "SG": {
+      "name_zh": "新加坡",
+      "name_en": "Singapore"
+    },
+    "MY": {
+      "name_zh": "馬來西亞",
+      "name_en": "Malaysia"
+    },
+    "PH": {
+      "name_zh": "菲律賓",
+      "name_en": "Philippines"
+    },
+    "VN": {
+      "name_zh": "越南",
+      "name_en": "Vietnam"
+    },
+    "ID": {
+      "name_zh": "印尼",
+      "name_en": "Indonesia"
+    },
+    "CN": {
+      "name_zh": "中國大陸",
+      "name_en": "Mainland China"
+    },
+    "IN": {
+      "name_zh": "印度",
+      "name_en": "India"
+    },
+    "MV": {
+      "name_zh": "馬爾地夫",
+      "name_en": "Maldives"
+    },
+    "AE": {
+      "name_zh": "阿拉伯聯合大公國",
+      "name_en": "United Arab Emirates"
+    },
+    "QA": {
+      "name_zh": "卡達",
+      "name_en": "Qatar"
+    },
+    "GB": {
+      "name_zh": "英國",
+      "name_en": "United Kingdom"
+    },
+    "FR": {
+      "name_zh": "法國",
+      "name_en": "France"
+    },
+    "DE": {
+      "name_zh": "德國",
+      "name_en": "Germany"
+    },
+    "NL": {
+      "name_zh": "荷蘭",
+      "name_en": "Netherlands"
+    },
+    "CH": {
+      "name_zh": "瑞士",
+      "name_en": "Switzerland"
+    },
+    "AT": {
+      "name_zh": "奧地利",
+      "name_en": "Austria"
+    },
+    "IT": {
+      "name_zh": "義大利",
+      "name_en": "Italy"
+    },
+    "ES": {
+      "name_zh": "西班牙",
+      "name_en": "Spain"
+    },
+    "PT": {
+      "name_zh": "葡萄牙",
+      "name_en": "Portugal"
+    },
+    "CZ": {
+      "name_zh": "捷克",
+      "name_en": "Czech Republic"
+    },
+    "HU": {
+      "name_zh": "匈牙利",
+      "name_en": "Hungary"
+    },
+    "DK": {
+      "name_zh": "丹麥",
+      "name_en": "Denmark"
+    },
+    "SE": {
+      "name_zh": "瑞典",
+      "name_en": "Sweden"
+    },
+    "NO": {
+      "name_zh": "挪威",
+      "name_en": "Norway"
+    },
+    "FI": {
+      "name_zh": "芬蘭",
+      "name_en": "Finland"
+    },
+    "IE": {
+      "name_zh": "愛爾蘭",
+      "name_en": "Ireland"
+    },
+    "GR": {
+      "name_zh": "希臘",
+      "name_en": "Greece"
+    },
+    "TR": {
+      "name_zh": "土耳其",
+      "name_en": "Türkiye"
+    },
+    "US": {
+      "name_zh": "美國",
+      "name_en": "United States"
+    },
+    "CA": {
+      "name_zh": "加拿大",
+      "name_en": "Canada"
+    },
+    "MX": {
+      "name_zh": "墨西哥",
+      "name_en": "Mexico"
+    },
+    "BR": {
+      "name_zh": "巴西",
+      "name_en": "Brazil"
+    },
+    "AR": {
+      "name_zh": "阿根廷",
+      "name_en": "Argentina"
+    },
+    "PE": {
+      "name_zh": "秘魯",
+      "name_en": "Peru"
+    },
+    "CL": {
+      "name_zh": "智利",
+      "name_en": "Chile"
+    },
+    "CO": {
+      "name_zh": "哥倫比亞",
+      "name_en": "Colombia"
+    },
+    "AU": {
+      "name_zh": "澳洲",
+      "name_en": "Australia"
+    },
+    "NZ": {
+      "name_zh": "紐西蘭",
+      "name_en": "New Zealand"
+    }
+  },
   "origins": [
     {
       "code": "TPE",
       "type": "city",
       "name_zh": "台北",
       "name_en": "Taipei",
-      "country": "TW"
+      "country": "TW",
+      "airports": [
+        "TPE",
+        "TSA"
+      ]
     },
     {
       "code": "KHH",
@@ -30,175 +249,875 @@
       "type": "city",
       "name_zh": "東京",
       "name_en": "Tokyo",
-      "country": "JP"
+      "country": "JP",
+      "region": "asia",
+      "airports": [
+        "NRT",
+        "HND"
+      ]
     },
     {
       "code": "OSA",
       "type": "city",
       "name_zh": "大阪",
       "name_en": "Osaka",
-      "country": "JP"
+      "country": "JP",
+      "region": "asia",
+      "airports": [
+        "KIX",
+        "ITM",
+        "UKB"
+      ]
     },
     {
       "code": "NGO",
       "type": "airport",
       "name_zh": "名古屋",
       "name_en": "Nagoya",
-      "country": "JP"
+      "country": "JP",
+      "region": "asia"
     },
     {
       "code": "FUK",
       "type": "airport",
       "name_zh": "福岡",
       "name_en": "Fukuoka",
-      "country": "JP"
+      "country": "JP",
+      "region": "asia"
     },
     {
       "code": "OKA",
       "type": "airport",
       "name_zh": "沖繩",
       "name_en": "Okinawa",
-      "country": "JP"
+      "country": "JP",
+      "region": "asia"
     },
     {
       "code": "SPK",
       "type": "city",
       "name_zh": "札幌",
       "name_en": "Sapporo",
-      "country": "JP"
+      "country": "JP",
+      "region": "asia",
+      "airports": [
+        "CTS",
+        "OKD"
+      ]
     },
     {
       "code": "KMJ",
       "type": "airport",
       "name_zh": "熊本",
       "name_en": "Kumamoto",
-      "country": "JP"
+      "country": "JP",
+      "region": "asia"
     },
     {
       "code": "SEL",
       "type": "city",
       "name_zh": "首爾",
       "name_en": "Seoul",
-      "country": "KR"
+      "country": "KR",
+      "region": "asia",
+      "airports": [
+        "ICN",
+        "GMP"
+      ]
     },
     {
       "code": "PUS",
       "type": "airport",
       "name_zh": "釜山",
       "name_en": "Busan",
-      "country": "KR"
+      "country": "KR",
+      "region": "asia"
     },
     {
       "code": "CJU",
       "type": "airport",
       "name_zh": "濟州",
       "name_en": "Jeju",
-      "country": "KR"
+      "country": "KR",
+      "region": "asia"
     },
     {
       "code": "HKG",
       "type": "airport",
       "name_zh": "香港",
       "name_en": "Hong Kong",
-      "country": "HK"
+      "country": "HK",
+      "region": "asia"
     },
     {
       "code": "MFM",
       "type": "airport",
       "name_zh": "澳門",
       "name_en": "Macau",
-      "country": "MO"
+      "country": "MO",
+      "region": "asia"
     },
     {
       "code": "BKK",
       "type": "city",
       "name_zh": "曼谷",
       "name_en": "Bangkok",
-      "country": "TH"
+      "country": "TH",
+      "region": "asia",
+      "airports": [
+        "BKK",
+        "DMK"
+      ]
     },
     {
       "code": "CNX",
       "type": "airport",
       "name_zh": "清邁",
       "name_en": "Chiang Mai",
-      "country": "TH"
+      "country": "TH",
+      "region": "asia"
     },
     {
       "code": "HKT",
       "type": "airport",
       "name_zh": "普吉",
       "name_en": "Phuket",
-      "country": "TH"
+      "country": "TH",
+      "region": "asia"
     },
     {
       "code": "SIN",
       "type": "airport",
       "name_zh": "新加坡",
       "name_en": "Singapore",
-      "country": "SG"
+      "country": "SG",
+      "region": "asia"
     },
     {
       "code": "KUL",
       "type": "airport",
       "name_zh": "吉隆坡",
       "name_en": "Kuala Lumpur",
-      "country": "MY"
+      "country": "MY",
+      "region": "asia"
     },
     {
       "code": "PEN",
       "type": "airport",
       "name_zh": "檳城",
       "name_en": "Penang",
-      "country": "MY"
+      "country": "MY",
+      "region": "asia"
     },
     {
       "code": "BKI",
       "type": "airport",
       "name_zh": "亞庇",
       "name_en": "Kota Kinabalu",
-      "country": "MY"
+      "country": "MY",
+      "region": "asia"
     },
     {
       "code": "MNL",
       "type": "airport",
       "name_zh": "馬尼拉",
       "name_en": "Manila",
-      "country": "PH"
+      "country": "PH",
+      "region": "asia"
     },
     {
       "code": "CEB",
       "type": "airport",
       "name_zh": "宿霧",
       "name_en": "Cebu",
-      "country": "PH"
+      "country": "PH",
+      "region": "asia"
     },
     {
       "code": "SGN",
       "type": "airport",
       "name_zh": "胡志明市",
       "name_en": "Ho Chi Minh City",
-      "country": "VN"
+      "country": "VN",
+      "region": "asia"
     },
     {
       "code": "HAN",
       "type": "airport",
       "name_zh": "河內",
       "name_en": "Hanoi",
-      "country": "VN"
+      "country": "VN",
+      "region": "asia"
     },
     {
       "code": "DAD",
       "type": "airport",
       "name_zh": "峴港",
       "name_en": "Da Nang",
-      "country": "VN"
+      "country": "VN",
+      "region": "asia"
     },
     {
       "code": "DPS",
       "type": "airport",
       "name_zh": "峇里島",
       "name_en": "Bali",
-      "country": "ID"
+      "country": "ID",
+      "region": "asia"
+    },
+    {
+      "code": "SHA",
+      "type": "city",
+      "name_zh": "上海",
+      "name_en": "Shanghai",
+      "country": "CN",
+      "region": "asia",
+      "airports": [
+        "PVG",
+        "SHA"
+      ]
+    },
+    {
+      "code": "BJS",
+      "type": "city",
+      "name_zh": "北京",
+      "name_en": "Beijing",
+      "country": "CN",
+      "region": "asia",
+      "airports": [
+        "PEK",
+        "PKX"
+      ]
+    },
+    {
+      "code": "JKT",
+      "type": "city",
+      "name_zh": "雅加達",
+      "name_en": "Jakarta",
+      "country": "ID",
+      "region": "asia",
+      "airports": [
+        "CGK",
+        "HLP"
+      ]
+    },
+    {
+      "code": "DEL",
+      "type": "airport",
+      "name_zh": "德里",
+      "name_en": "Delhi",
+      "country": "IN",
+      "region": "asia"
+    },
+    {
+      "code": "BOM",
+      "type": "airport",
+      "name_zh": "孟買",
+      "name_en": "Mumbai",
+      "country": "IN",
+      "region": "asia"
+    },
+    {
+      "code": "MLE",
+      "type": "airport",
+      "name_zh": "馬爾地夫",
+      "name_en": "Maldives (Malé)",
+      "country": "MV",
+      "region": "asia"
+    },
+    {
+      "code": "DXB",
+      "type": "city",
+      "name_zh": "杜拜",
+      "name_en": "Dubai",
+      "country": "AE",
+      "region": "middle_east",
+      "airports": [
+        "DXB",
+        "DWC"
+      ]
+    },
+    {
+      "code": "AUH",
+      "type": "airport",
+      "name_zh": "阿布達比",
+      "name_en": "Abu Dhabi",
+      "country": "AE",
+      "region": "middle_east"
+    },
+    {
+      "code": "DOH",
+      "type": "airport",
+      "name_zh": "杜哈",
+      "name_en": "Doha",
+      "country": "QA",
+      "region": "middle_east"
+    },
+    {
+      "code": "LON",
+      "type": "city",
+      "name_zh": "倫敦",
+      "name_en": "London",
+      "country": "GB",
+      "region": "europe",
+      "airports": [
+        "LHR",
+        "LGW",
+        "STN",
+        "LTN",
+        "LCY",
+        "SEN"
+      ]
+    },
+    {
+      "code": "EDI",
+      "type": "airport",
+      "name_zh": "愛丁堡",
+      "name_en": "Edinburgh",
+      "country": "GB",
+      "region": "europe"
+    },
+    {
+      "code": "PAR",
+      "type": "city",
+      "name_zh": "巴黎",
+      "name_en": "Paris",
+      "country": "FR",
+      "region": "europe",
+      "airports": [
+        "CDG",
+        "ORY",
+        "BVA"
+      ]
+    },
+    {
+      "code": "FRA",
+      "type": "airport",
+      "name_zh": "法蘭克福",
+      "name_en": "Frankfurt",
+      "country": "DE",
+      "region": "europe"
+    },
+    {
+      "code": "MUC",
+      "type": "airport",
+      "name_zh": "慕尼黑",
+      "name_en": "Munich",
+      "country": "DE",
+      "region": "europe"
+    },
+    {
+      "code": "BER",
+      "type": "airport",
+      "name_zh": "柏林",
+      "name_en": "Berlin",
+      "country": "DE",
+      "region": "europe"
+    },
+    {
+      "code": "AMS",
+      "type": "airport",
+      "name_zh": "阿姆斯特丹",
+      "name_en": "Amsterdam",
+      "country": "NL",
+      "region": "europe"
+    },
+    {
+      "code": "ZRH",
+      "type": "airport",
+      "name_zh": "蘇黎世",
+      "name_en": "Zurich",
+      "country": "CH",
+      "region": "europe"
+    },
+    {
+      "code": "GVA",
+      "type": "airport",
+      "name_zh": "日內瓦",
+      "name_en": "Geneva",
+      "country": "CH",
+      "region": "europe"
+    },
+    {
+      "code": "VIE",
+      "type": "airport",
+      "name_zh": "維也納",
+      "name_en": "Vienna",
+      "country": "AT",
+      "region": "europe"
+    },
+    {
+      "code": "ROM",
+      "type": "city",
+      "name_zh": "羅馬",
+      "name_en": "Rome",
+      "country": "IT",
+      "region": "europe",
+      "airports": [
+        "FCO",
+        "CIA"
+      ]
+    },
+    {
+      "code": "MIL",
+      "type": "city",
+      "name_zh": "米蘭",
+      "name_en": "Milan",
+      "country": "IT",
+      "region": "europe",
+      "airports": [
+        "MXP",
+        "LIN",
+        "BGY"
+      ]
+    },
+    {
+      "code": "VCE",
+      "type": "airport",
+      "name_zh": "威尼斯",
+      "name_en": "Venice",
+      "country": "IT",
+      "region": "europe"
+    },
+    {
+      "code": "FLR",
+      "type": "airport",
+      "name_zh": "佛羅倫斯",
+      "name_en": "Florence",
+      "country": "IT",
+      "region": "europe"
+    },
+    {
+      "code": "MAD",
+      "type": "airport",
+      "name_zh": "馬德里",
+      "name_en": "Madrid",
+      "country": "ES",
+      "region": "europe"
+    },
+    {
+      "code": "BCN",
+      "type": "airport",
+      "name_zh": "巴塞隆納",
+      "name_en": "Barcelona",
+      "country": "ES",
+      "region": "europe"
+    },
+    {
+      "code": "LIS",
+      "type": "airport",
+      "name_zh": "里斯本",
+      "name_en": "Lisbon",
+      "country": "PT",
+      "region": "europe"
+    },
+    {
+      "code": "OPO",
+      "type": "airport",
+      "name_zh": "波多",
+      "name_en": "Porto",
+      "country": "PT",
+      "region": "europe"
+    },
+    {
+      "code": "PRG",
+      "type": "airport",
+      "name_zh": "布拉格",
+      "name_en": "Prague",
+      "country": "CZ",
+      "region": "europe"
+    },
+    {
+      "code": "BUD",
+      "type": "airport",
+      "name_zh": "布達佩斯",
+      "name_en": "Budapest",
+      "country": "HU",
+      "region": "europe"
+    },
+    {
+      "code": "CPH",
+      "type": "airport",
+      "name_zh": "哥本哈根",
+      "name_en": "Copenhagen",
+      "country": "DK",
+      "region": "europe"
+    },
+    {
+      "code": "STO",
+      "type": "city",
+      "name_zh": "斯德哥爾摩",
+      "name_en": "Stockholm",
+      "country": "SE",
+      "region": "europe",
+      "airports": [
+        "ARN",
+        "BMA",
+        "NYO",
+        "VST"
+      ]
+    },
+    {
+      "code": "OSL",
+      "type": "airport",
+      "name_zh": "奧斯陸",
+      "name_en": "Oslo",
+      "country": "NO",
+      "region": "europe"
+    },
+    {
+      "code": "HEL",
+      "type": "airport",
+      "name_zh": "赫爾辛基",
+      "name_en": "Helsinki",
+      "country": "FI",
+      "region": "europe"
+    },
+    {
+      "code": "DUB",
+      "type": "airport",
+      "name_zh": "都柏林",
+      "name_en": "Dublin",
+      "country": "IE",
+      "region": "europe"
+    },
+    {
+      "code": "ATH",
+      "type": "airport",
+      "name_zh": "雅典",
+      "name_en": "Athens",
+      "country": "GR",
+      "region": "europe"
+    },
+    {
+      "code": "IST",
+      "type": "city",
+      "name_zh": "伊斯坦堡",
+      "name_en": "Istanbul",
+      "country": "TR",
+      "region": "europe",
+      "airports": [
+        "IST",
+        "SAW"
+      ]
+    },
+    {
+      "code": "LAX",
+      "type": "airport",
+      "name_zh": "洛杉磯",
+      "name_en": "Los Angeles",
+      "country": "US",
+      "region": "north_america"
+    },
+    {
+      "code": "SFO",
+      "type": "airport",
+      "name_zh": "舊金山",
+      "name_en": "San Francisco",
+      "country": "US",
+      "region": "north_america"
+    },
+    {
+      "code": "SEA",
+      "type": "airport",
+      "name_zh": "西雅圖",
+      "name_en": "Seattle",
+      "country": "US",
+      "region": "north_america"
+    },
+    {
+      "code": "LAS",
+      "type": "airport",
+      "name_zh": "拉斯維加斯",
+      "name_en": "Las Vegas",
+      "country": "US",
+      "region": "north_america"
+    },
+    {
+      "code": "NYC",
+      "type": "city",
+      "name_zh": "紐約",
+      "name_en": "New York",
+      "country": "US",
+      "region": "north_america",
+      "airports": [
+        "JFK",
+        "EWR",
+        "LGA"
+      ]
+    },
+    {
+      "code": "BOS",
+      "type": "airport",
+      "name_zh": "波士頓",
+      "name_en": "Boston",
+      "country": "US",
+      "region": "north_america"
+    },
+    {
+      "code": "WAS",
+      "type": "city",
+      "name_zh": "華盛頓",
+      "name_en": "Washington, D.C.",
+      "country": "US",
+      "region": "north_america",
+      "airports": [
+        "IAD",
+        "DCA",
+        "BWI"
+      ]
+    },
+    {
+      "code": "CHI",
+      "type": "city",
+      "name_zh": "芝加哥",
+      "name_en": "Chicago",
+      "country": "US",
+      "region": "north_america",
+      "airports": [
+        "ORD",
+        "MDW"
+      ]
+    },
+    {
+      "code": "DFW",
+      "type": "city",
+      "name_zh": "達拉斯",
+      "name_en": "Dallas",
+      "country": "US",
+      "region": "north_america",
+      "airports": [
+        "DFW",
+        "DAL"
+      ]
+    },
+    {
+      "code": "MIA",
+      "type": "airport",
+      "name_zh": "邁阿密",
+      "name_en": "Miami",
+      "country": "US",
+      "region": "north_america"
+    },
+    {
+      "code": "HNL",
+      "type": "airport",
+      "name_zh": "檀香山（夏威夷）",
+      "name_en": "Honolulu (Hawaii)",
+      "country": "US",
+      "region": "north_america"
+    },
+    {
+      "code": "YVR",
+      "type": "airport",
+      "name_zh": "溫哥華",
+      "name_en": "Vancouver",
+      "country": "CA",
+      "region": "north_america"
+    },
+    {
+      "code": "YYC",
+      "type": "airport",
+      "name_zh": "卡加利",
+      "name_en": "Calgary",
+      "country": "CA",
+      "region": "north_america"
+    },
+    {
+      "code": "YTO",
+      "type": "city",
+      "name_zh": "多倫多",
+      "name_en": "Toronto",
+      "country": "CA",
+      "region": "north_america",
+      "airports": [
+        "YYZ",
+        "YTZ"
+      ]
+    },
+    {
+      "code": "YMQ",
+      "type": "city",
+      "name_zh": "蒙特婁",
+      "name_en": "Montreal",
+      "country": "CA",
+      "region": "north_america",
+      "airports": [
+        "YUL"
+      ]
+    },
+    {
+      "code": "MEX",
+      "type": "city",
+      "name_zh": "墨西哥城",
+      "name_en": "Mexico City",
+      "country": "MX",
+      "region": "north_america",
+      "airports": [
+        "MEX",
+        "NLU"
+      ]
+    },
+    {
+      "code": "CUN",
+      "type": "airport",
+      "name_zh": "坎昆",
+      "name_en": "Cancún",
+      "country": "MX",
+      "region": "north_america"
+    },
+    {
+      "code": "SAO",
+      "type": "city",
+      "name_zh": "聖保羅",
+      "name_en": "São Paulo",
+      "country": "BR",
+      "region": "latin_america",
+      "airports": [
+        "GRU",
+        "CGH",
+        "VCP"
+      ]
+    },
+    {
+      "code": "RIO",
+      "type": "city",
+      "name_zh": "里約熱內盧",
+      "name_en": "Rio de Janeiro",
+      "country": "BR",
+      "region": "latin_america",
+      "airports": [
+        "GIG",
+        "SDU"
+      ]
+    },
+    {
+      "code": "BUE",
+      "type": "city",
+      "name_zh": "布宜諾斯艾利斯",
+      "name_en": "Buenos Aires",
+      "country": "AR",
+      "region": "latin_america",
+      "airports": [
+        "EZE",
+        "AEP"
+      ]
+    },
+    {
+      "code": "LIM",
+      "type": "airport",
+      "name_zh": "利馬",
+      "name_en": "Lima",
+      "country": "PE",
+      "region": "latin_america"
+    },
+    {
+      "code": "SCL",
+      "type": "airport",
+      "name_zh": "聖地牙哥（智利）",
+      "name_en": "Santiago (Chile)",
+      "country": "CL",
+      "region": "latin_america"
+    },
+    {
+      "code": "BOG",
+      "type": "airport",
+      "name_zh": "波哥大",
+      "name_en": "Bogotá",
+      "country": "CO",
+      "region": "latin_america"
+    },
+    {
+      "code": "SYD",
+      "type": "airport",
+      "name_zh": "雪梨",
+      "name_en": "Sydney",
+      "country": "AU",
+      "region": "australia"
+    },
+    {
+      "code": "MEL",
+      "type": "city",
+      "name_zh": "墨爾本",
+      "name_en": "Melbourne",
+      "country": "AU",
+      "region": "australia",
+      "airports": [
+        "MEL",
+        "AVV"
+      ]
+    },
+    {
+      "code": "BNE",
+      "type": "airport",
+      "name_zh": "布里斯本",
+      "name_en": "Brisbane",
+      "country": "AU",
+      "region": "australia"
+    },
+    {
+      "code": "PER",
+      "type": "airport",
+      "name_zh": "伯斯",
+      "name_en": "Perth",
+      "country": "AU",
+      "region": "australia"
+    },
+    {
+      "code": "ADL",
+      "type": "airport",
+      "name_zh": "阿得雷德",
+      "name_en": "Adelaide",
+      "country": "AU",
+      "region": "australia"
+    },
+    {
+      "code": "CNS",
+      "type": "airport",
+      "name_zh": "凱恩斯",
+      "name_en": "Cairns",
+      "country": "AU",
+      "region": "australia"
+    },
+    {
+      "code": "OOL",
+      "type": "airport",
+      "name_zh": "黃金海岸",
+      "name_en": "Gold Coast",
+      "country": "AU",
+      "region": "australia"
+    },
+    {
+      "code": "AKL",
+      "type": "airport",
+      "name_zh": "奧克蘭",
+      "name_en": "Auckland",
+      "country": "NZ",
+      "region": "new_zealand"
+    },
+    {
+      "code": "CHC",
+      "type": "airport",
+      "name_zh": "基督城",
+      "name_en": "Christchurch",
+      "country": "NZ",
+      "region": "new_zealand"
+    },
+    {
+      "code": "WLG",
+      "type": "airport",
+      "name_zh": "威靈頓",
+      "name_en": "Wellington",
+      "country": "NZ",
+      "region": "new_zealand"
+    },
+    {
+      "code": "ZQN",
+      "type": "airport",
+      "name_zh": "皇后鎮",
+      "name_en": "Queenstown",
+      "country": "NZ",
+      "region": "new_zealand"
     }
   ]
 }

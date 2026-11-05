@@ -1,4 +1,4 @@
-import { useReducer } from "react";
+import { useMemo, useReducer } from "react";
 import { Link } from "react-router";
 import { FlaskConical } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -6,6 +6,7 @@ import { SiteHeader } from "@/components/SiteHeader";
 import { RouteForm } from "@/components/m14/RouteForm";
 import { SubscriptionItem } from "@/components/m14/SubscriptionItem";
 import { POLICY } from "@/lib/m14/catalog";
+import { demoFareChecks, fareCheckKey, fareDisplay } from "@/lib/m14/fare-status";
 import {
   demoSubscriptions,
   errorMessage,
@@ -31,6 +32,9 @@ export default function PrototypeSubscriptions({ now = () => new Date() }: { now
     (): State => ({ subs: demoSubscriptions(now()), lastError: null }),
   );
   const today = now();
+  // Demo fare results for the demo rows only; new or changed route-months show 「尚未查詢」.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const fareChecks = useMemo(() => demoFareChecks(demoSubscriptions(now()), now()), []);
   const stamp = () => now().toISOString();
 
   return (
@@ -101,6 +105,7 @@ export default function PrototypeSubscriptions({ now = () => new Date() }: { now
                   sub={sub}
                   subs={state.subs}
                   now={today}
+                  fare={fareDisplay(sub, today, fareChecks.get(fareCheckKey(sub, today)) ?? null)}
                   onEdit={(value) =>
                     dispatch({ type: "edit", route: sub.route, value, now: stamp() })
                   }

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Pause, Pencil, Play, Plane, RotateCcw, Trash2 } from "lucide-react";
+import { CircleAlert, Info, Pause, Pencil, Play, Plane, RotateCcw, Trash2 } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -15,7 +15,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { placeLabel, routeLabel, routeLabelEn } from "@/lib/m14/catalog";
 import { effectiveMonth, monthLabel } from "@/lib/m14/months";
+import type { FareDisplay } from "@/lib/m14/fare-status";
 import { statusOf, type RouteSubscription, type Validated } from "@/lib/m14/subscriptions";
+import { cn } from "@/lib/utils";
 import { RouteForm } from "./RouteForm";
 
 const twd = new Intl.NumberFormat("zh-TW");
@@ -30,6 +32,8 @@ interface SubscriptionItemProps {
   sub: RouteSubscription;
   subs: readonly RouteSubscription[];
   now: Date;
+  /** What the latest fare check says (prototype: demo data). */
+  fare: FareDisplay;
   onEdit: (value: Validated) => void;
   onPause: () => void;
   onResume: () => void;
@@ -40,6 +44,7 @@ export function SubscriptionItem({
   sub,
   subs,
   now,
+  fare,
   onEdit,
   onPause,
   onResume,
@@ -72,10 +77,25 @@ export function SubscriptionItem({
             </span>
             {" · "}目標價 <span className="font-semibold">NT${twd.format(sub.target_price)}</span>
           </p>
+          <p
+            data-fare-kind={fare.kind}
+            className={cn(
+              "mt-2 flex items-start gap-1.5 text-sm",
+              fare.kind === "error" || fare.kind === "expired"
+                ? "text-destructive"
+                : "text-muted-foreground",
+            )}
+          >
+            {fare.kind === "error" || fare.kind === "expired" ? (
+              <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+            ) : (
+              <Info className="mt-0.5 h-4 w-4 shrink-0" />
+            )}
+            <span>{fare.text}</span>
+          </p>
           {status === "expired" && (
-            <p className="mt-2 text-sm text-destructive">
-              出發月份已過，不再查詢票價或寄送通知。請選擇新的出發月份以重新啟用（仍佔用 1
-              筆訂閱額度）。
+            <p className="mt-1 text-sm text-destructive">
+              請選擇新的出發月份以重新啟用（仍佔用 1 筆訂閱額度）。
             </p>
           )}
         </div>

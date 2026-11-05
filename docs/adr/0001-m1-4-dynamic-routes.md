@@ -1,7 +1,7 @@
 # ADR 0001 — M1.4 user-defined routes
 
 - **Status:** Accepted for Phase 0 (design only). Phases 1–5 each need separate approval.
-- **Date:** 2026-11-04; revised 2026-11-05 (D4 total limit, D12–D14)
+- **Date:** 2026-11-04; revised 2026-11-05 (D3 worldwide catalog, D4 total limit, D12–D14)
 - **Scope:** subscriptions API, fare check (wrapper/parser), front end, deployment.
   The notification Lambda, `notification_history`, deduplication, the SQS trigger and the
   EventBridge schedule are **out of scope and frozen**.
@@ -31,11 +31,27 @@ different month is not a second subscription.
 `subscription_status` is reserved for M2's payment paywall. "Paused by the user" and "not paid"
 are independent; from M2 an alert requires `not alerts_paused AND subscription_status = active`.
 
-### D3. Curated, file-driven allowlist
-`aws/config/airports.json` (schema_version 1): origins TPE, KHH, RMQ; 25 Asian destinations.
-Each entry has `code`, `type` (`city` = IATA metro code such as TYO, or `airport`),
-`name_zh`, `name_en`, `country`. The API validates against it server-side; the front end
-reads the same file at build time. Expanding = editing the file (no schema change).
+### D3. Curated, file-driven allowlist (worldwide, 95 destinations)
+`aws/config/airports.json` (schema_version 2, 2026-11-05): origins TPE, KHH, RMQ; 95
+destinations in seven regions — Asia (31, the original 25 kept first and unchanged), Middle
+East (3), Europe (27), North America (17), Central and South America (6), Australia (7) and
+New Zealand (4). Each entry has `code`, `type`, `name_zh`, `name_en`, `country` and (for
+destinations) `region`; the file also carries `regions` (display order and names) and
+`countries` (names, for search).
+
+- `type: "city"` is an IATA **metropolitan** code that searches several airports, listed in
+  `airports` (LON = LHR, LGW, STN, LTN, LCY, SEN; NYC = JFK, EWR, LGA). `type: "airport"` is
+  one airport (FRA, AKL) and has no `airports` field. An airport covered by a city entry is never
+  also its own entry (no HND next to TYO), so the same flights are never offered twice.
+- Every code was checked on 2026-11-05 against OpenTravelData's `optd_por_public.csv` (current
+  records only: code exists in the stated country, airports are airports, city codes are city
+  codes and each listed airport belongs to that city) with `aws/tools/verify_airports.py`,
+  which future expansions must re-run.
+- The API validates against the file server-side; the front end reads the same file at build
+  time. Expanding = editing the file and re-running the check (no schema change).
+- **The catalog is only an allowlist.** It never drives fare queries: the fare check looks up
+  only `(origin, destination, effective_month)` groups that have at least one active,
+  non-expired subscription (D12), so adding destinations adds no Travelpayouts requests.
 
 ### D4. Strict total limit of 10 subscription records per user
 Owner decision 2026-11-05: `aws/config/subscription-policy.json` →
@@ -154,7 +170,11 @@ routes stay unattached/inaccessible in between; otherwise they ship together.
 - **Departure month in the sort key** (several months per route): more flexible, but changes the
   dedup key and needs a migration. Rejected; one month per route pair.
 - **Free-text airport search (Travelpayouts autocomplete)**: better UX, but unpopular routes
-  often have no cached fares. Deferred until the allowlist proves out.
+  often have no cached fares, and every keystroke would be an external request. Instead the UI
+  searches the curated catalog locally (Chinese name, English name, IATA code, country or
+  region). Autocomplete deferred until the allowlist proves out.
+- **Every airport in a metro area as separate entries**: more precise, but duplicates fares and
+  confuses users (Tokyo vs Narita vs Haneda). Rejected in favour of city codes where they exist.
 - **Keep inline CloudFormation code**: no new infrastructure, but the notification code is
   already at the limit and reading code back through the AWS connector is unreliable for
   non-ASCII text. Rejected for the long term.

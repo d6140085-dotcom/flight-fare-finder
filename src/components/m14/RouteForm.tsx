@@ -2,7 +2,7 @@ import { useId, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { DESTINATIONS, ORIGINS, POLICY, type Airport } from "@/lib/m14/catalog";
+import { ORIGINS, POLICY, type Airport } from "@/lib/m14/catalog";
 import { effectiveMonth, isExpiredMonth, monthLabel, selectableMonths } from "@/lib/m14/months";
 import {
   ROLLING,
@@ -12,6 +12,7 @@ import {
   type RouteSubscription,
   type Validated,
 } from "@/lib/m14/subscriptions";
+import { DestinationPicker } from "./DestinationPicker";
 
 const selectClass =
   "flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-base shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 md:text-sm";
@@ -80,7 +81,7 @@ export function RouteForm({ subs, now, editing, submitLabel, onSubmit, onCancel 
       aria-label={editing ? "編輯訂閱" : "新增訂閱"}
       className="space-y-4"
     >
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor={`${id}-origin`}>出發地</Label>
           <select
@@ -96,20 +97,16 @@ export function RouteForm({ subs, now, editing, submitLabel, onSubmit, onCancel 
         </div>
         <div className="space-y-2">
           <Label htmlFor={`${id}-destination`}>目的地</Label>
-          <select
+          <DestinationPicker
             id={`${id}-destination`}
-            className={selectClass}
             value={destination}
-            onChange={(e) => setDestination(e.target.value)}
-            aria-invalid={has(
+            onChange={setDestination}
+            invalid={has(
               "destination_required",
               "unsupported_destination",
               "same_origin_destination",
             )}
-          >
-            <option value="">請選擇目的地</option>
-            {placeOptions(DESTINATIONS)}
-          </select>
+          />
         </div>
         <div className="space-y-2">
           <Label htmlFor={`${id}-month`}>出發月份</Label>

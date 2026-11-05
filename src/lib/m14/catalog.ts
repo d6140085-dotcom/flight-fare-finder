@@ -5,12 +5,32 @@ import policyConfig from "../../../aws/config/subscription-policy.json";
 
 export type AirportType = "city" | "airport";
 
+export type RegionId =
+  | "asia"
+  | "middle_east"
+  | "europe"
+  | "north_america"
+  | "latin_america"
+  | "australia"
+  | "new_zealand";
+
+export interface Region {
+  id: RegionId;
+  name_zh: string;
+  name_en: string;
+}
+
 export interface Airport {
   code: string;
+  /** "city" = IATA metropolitan code searching every airport in `airports`; "airport" = one airport. */
   type: AirportType;
   name_zh: string;
   name_en: string;
   country: string;
+  /** Destinations only. */
+  region?: RegionId;
+  /** City codes only: the airports the code covers. */
+  airports?: string[];
 }
 
 export interface SubscriptionPolicy {
@@ -28,6 +48,11 @@ export interface SubscriptionPolicy {
 
 export const ORIGINS: readonly Airport[] = airportsConfig.origins as Airport[];
 export const DESTINATIONS: readonly Airport[] = airportsConfig.destinations as Airport[];
+/** Display order of the destination groups. */
+export const REGIONS: readonly Region[] = airportsConfig.regions as Region[];
+/** Country names by ISO 3166-1 code, used for search ("日本", "Canada"). */
+export const COUNTRIES: Readonly<Record<string, { name_zh: string; name_en: string }>> =
+  airportsConfig.countries;
 
 export const POLICY: SubscriptionPolicy = {
   maxSubscriptions: policyConfig.max_subscriptions_per_user,

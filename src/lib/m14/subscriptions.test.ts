@@ -37,9 +37,10 @@ const ten = (extra: Partial<RouteSubscription> = {}) =>
   DESTINATIONS.slice(0, 10).map((d) => sub(`TPE-${d.code}`, extra));
 
 describe("catalog and policy", () => {
-  it("offers the three origins and 25 destinations from airports.json", () => {
+  it("offers the three origins and the worldwide destination catalog from airports.json", () => {
     expect(ORIGINS.map((a) => a.code)).toEqual(["TPE", "KHH", "RMQ"]);
-    expect(DESTINATIONS).toHaveLength(25);
+    expect(DESTINATIONS.length).toBeGreaterThanOrEqual(80);
+    expect(DESTINATIONS.length).toBeLessThanOrEqual(100);
     expect(routeLabel("TPE", "TYO")).toBe("台北 → 東京");
   });
 
@@ -84,6 +85,22 @@ describe("validate", () => {
     });
   });
 
+  it.each(["LON", "PAR", "NYC", "LAX", "YVR", "SAO", "SYD", "MEL", "AKL", "ZQN", "DXB", "IST"])(
+    "accepts the worldwide destination %s",
+    (destination) => {
+      expect(validate([], { ...ok, destination }, { now: NOW })).toMatchObject({
+        ok: true,
+        value: { destination },
+      });
+    },
+  );
+
+  it("rejects individual airports that a city code already covers (HND is part of TYO)", () => {
+    expect(validate([], { ...ok, destination: "HND" }, { now: NOW })).toMatchObject({
+      errors: ["unsupported_destination"],
+    });
+  });
+
   it("requires both places and rejects unsupported or identical ones", () => {
     expect(validate([], { ...ok, origin: "", destination: "" }, { now: NOW })).toEqual({
       ok: false,
@@ -92,7 +109,7 @@ describe("validate", () => {
     expect(validate([], { ...ok, origin: "NRT" }, { now: NOW })).toMatchObject({
       errors: ["unsupported_origin"],
     });
-    expect(validate([], { ...ok, destination: "LAX" }, { now: NOW })).toMatchObject({
+    expect(validate([], { ...ok, destination: "JNB" }, { now: NOW })).toMatchObject({
       errors: ["unsupported_destination"],
     });
     expect(validate([], { ...ok, destination: "TPE" }, { now: NOW })).toMatchObject({
@@ -306,12 +323,14 @@ describe("messages and demo data", () => {
     );
   });
 
-  it("demo rows cover rolling, paused and expired, with no personal data", () => {
+  it("demo rows cover rolling, paused, expired and long-haul routes, with no personal data", () => {
     const demo = demoSubscriptions(NOW);
     expect(demo.map((d) => [d.route, statusOf(d, NOW), d.departure_month])).toEqual([
       ["TPE-TYO", "active", null],
       ["KHH-OKA", "paused", "2027-01"],
       ["RMQ-SEL", "expired", "2026-10"],
+      ["TPE-LON", "active", "2027-02"],
+      ["TPE-SYD", "active", "2026-12"],
     ]);
     expect(JSON.stringify(demo)).not.toContain("@");
   });

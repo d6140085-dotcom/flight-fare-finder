@@ -151,20 +151,74 @@ class AirportsConfigTests(unittest.TestCase):
         self.cfg = json.loads((AWS / "config" / "airports.json").read_text(encoding="utf-8"))
 
     def test_schema(self):
-        self.assertEqual(self.cfg["schema_version"], 1)
+        self.assertEqual(self.cfg["schema_version"], 2)
+        regions = [r["id"] for r in self.cfg["regions"]]
+        self.assertEqual(regions, ["asia", "middle_east", "europe", "north_america", "latin_america",
+                                   "australia", "new_zealand"])
+        for r in self.cfg["regions"]:
+            self.assertTrue(r["name_zh"].strip() and r["name_en"].strip())
         for group in ("origins", "destinations"):
             for a in self.cfg[group]:
                 self.assertRegex(a["code"], r"^[A-Z]{3}$")
                 self.assertIn(a["type"], {"city", "airport"})
                 self.assertRegex(a["country"], r"^[A-Z]{2}$")
                 self.assertTrue(a["name_zh"].strip() and a["name_en"].strip())
+                if a["type"] == "city":
+                    # A city code names the airports it searches; an airport entry lists none.
+                    self.assertTrue(a["airports"], a["code"])
+                    self.assertEqual(len(a["airports"]), len(set(a["airports"])))
+                    for ap in a["airports"]:
+                        self.assertRegex(ap, r"^[A-Z]{3}$")
+                else:
+                    self.assertNotIn("airports", a)
+        for a in self.cfg["destinations"]:
+            self.assertIn(a["region"], regions)
 
-    def test_initial_lists(self):
+    def test_lists(self):
         self.assertEqual([a["code"] for a in self.cfg["origins"]], ["TPE", "KHH", "RMQ"])
         dest = [a["code"] for a in self.cfg["destinations"]]
-        self.assertEqual(len(dest), 25)
-        self.assertEqual(len(set(dest)), 25)
+        self.assertTrue(80 <= len(dest) <= 100, len(dest))
+        self.assertEqual(len(dest), len(set(dest)), "duplicate destination codes")
         self.assertFalse(set(dest) & {a["code"] for a in self.cfg["origins"]})
+        names = [(a["name_zh"], a["name_en"]) for a in self.cfg["destinations"]]
+        self.assertEqual(len(names), len(set(names)), "duplicate destination names")
+
+    def test_original_destinations_preserved(self):
+        original = ["TYO", "OSA", "NGO", "FUK", "OKA", "SPK", "KMJ", "SEL", "PUS", "CJU", "HKG", "MFM",
+                    "BKK", "CNX", "HKT", "SIN", "KUL", "PEN", "BKI", "MNL", "CEB", "SGN", "HAN", "DAD", "DPS"]
+        self.assertEqual([a["code"] for a in self.cfg["destinations"]][:25], original)
+
+    def test_requested_destinations_present(self):
+        dest = {a["code"]: a for a in self.cfg["destinations"]}
+        requested = {
+            "europe": "LON PAR FRA MUC AMS ZRH VIE ROM MIL VCE MAD BCN LIS PRG CPH OSL HEL IST",
+            "north_america": "LAX SFO NYC SEA CHI BOS WAS LAS MIA DFW HNL YVR YTO YMQ YYC MEX CUN",
+            "latin_america": "SAO BUE",
+            "australia": "SYD MEL BNE PER ADL CNS OOL",
+            "new_zealand": "AKL CHC WLG ZQN",
+        }
+        for region, codes in requested.items():
+            for code in codes.split():
+                self.assertEqual(dest[code]["region"], region, code)
+        countries = {a["country"] for a in self.cfg["destinations"] if a["region"] == "europe"}
+        self.assertTrue({"GB", "FR", "DE", "NL", "CH", "AT", "IT", "ES", "PT", "CZ", "HU", "DK", "SE",
+                         "NO", "FI", "IE", "GR", "TR"} <= countries)
+
+    def test_city_and_airport_codes_do_not_overlap(self):
+        # An airport searched by a city entry must not also be its own destination entry
+        # (e.g. TYO and HND), or the same flights would be offered twice.
+        cities = {a["code"]: set(a["airports"]) for a in self.cfg["destinations"] if a["type"] == "city"}
+        airports = {a["code"] for a in self.cfg["destinations"] if a["type"] == "airport"}
+        for city, aps in cities.items():
+            self.assertFalse(aps & airports, city)
+
+    def test_known_metro_codes(self):
+        dest = {a["code"]: a for a in self.cfg["destinations"]}
+        for code in ("TYO", "SEL", "LON", "PAR", "NYC", "CHI", "WAS", "YTO", "YMQ", "ROM", "MIL", "SAO", "BUE"):
+            self.assertEqual(dest[code]["type"], "city", code)
+        self.assertEqual(dest["NYC"]["airports"], ["JFK", "EWR", "LGA"])
+        for code in ("FRA", "AMS", "SYD", "AKL", "HNL"):
+            self.assertEqual(dest[code]["type"], "airport", code)
 
     def test_existing_m1_routes_remain_valid(self):
         origins = {a["code"] for a in self.cfg["origins"]}
