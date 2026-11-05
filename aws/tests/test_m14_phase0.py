@@ -185,7 +185,11 @@ class AirportsConfigTests(unittest.TestCase):
 class PolicyConfigTests(unittest.TestCase):
     def test_policy(self):
         p = json.loads((AWS / "config" / "subscription-policy.json").read_text(encoding="utf-8"))
-        self.assertEqual(p["max_active_subscriptions_per_user"], 10)
+        self.assertEqual(p["schema_version"], 2)
+        self.assertEqual(p["max_subscriptions_per_user"], 10)
+        self.assertNotIn("max_active_subscriptions_per_user", p)
+        self.assertEqual(p["departure_month"], {"format": "YYYY-MM", "first_offset_months": 1,
+                                                "window_months": 12, "timezone": "Asia/Taipei"})
         self.assertEqual(p["currency"], "TWD")
         self.assertEqual(p["target_price_twd"], {"min": 1, "max": 1000000})
 

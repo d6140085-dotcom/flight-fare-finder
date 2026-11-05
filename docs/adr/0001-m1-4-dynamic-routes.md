@@ -1,7 +1,7 @@
 # ADR 0001 — M1.4 user-defined routes
 
 - **Status:** Accepted for Phase 0 (design only). Phases 1–5 each need separate approval.
-- **Date:** 2026-11-04
+- **Date:** 2026-11-04; revised 2026-11-05 (D4 total limit, D12–D14)
 - **Scope:** subscriptions API, fare check (wrapper/parser), front end, deployment.
   The notification Lambda, `notification_history`, deduplication, the SQS trigger and the
   EventBridge schedule are **out of scope and frozen**.
@@ -21,9 +21,11 @@ Key stays `email` (partition) + `route` (sort, `ORIG-DEST`). One subscription pe
 route; "multiple subscriptions" means multiple routes. No migration: new attributes are
 optional and absent values have safe defaults.
 
-New attributes: `alerts_paused` (bool, absent = active), `route_type` and display names are
-derived from the allowlist, `plan_name` becomes optional (kept on the two M1 rows),
-`previous_route` (set when a route is changed, for audit).
+New attributes: `alerts_paused` (bool, absent = not paused), `departure_month` (`YYYY-MM`,
+absent = legacy rolling next-month row, D12), `route_type` and display names are derived from
+the allowlist, `plan_name` becomes optional (kept on the two M1 rows), `previous_route` (set
+when a route is changed, for audit). One subscription per route pair, with one month: a
+different month is not a second subscription.
 
 ### D2. Pause is `alerts_paused`, never `subscription_status`
 `subscription_status` is reserved for M2's payment paywall. "Paused by the user" and "not paid"
@@ -35,21 +37,31 @@ Each entry has `code`, `type` (`city` = IATA metro code such as TYO, or `airport
 `name_zh`, `name_en`, `country`. The API validates against it server-side; the front end
 reads the same file at build time. Expanding = editing the file (no schema change).
 
-### D4. Configurable active-subscription limit
-`aws/config/subscription-policy.json`: `max_active_subscriptions_per_user = 10`, passed to the
-API as an environment variable. Paused subscriptions don't count; resuming re-checks the limit.
-Enforcement (updated 2026-11-05, owner decision: **strict**): a per-user record in a separate
-`subscription_quota` table is updated in the same transaction as every write that changes the
-active count, guarded by a version condition, so concurrent requests can't exceed the limit.
-Details: `docs/api/m1.4-subscriptions-api.md` §5.
+### D4. Strict total limit of 10 subscription records per user
+Owner decision 2026-11-05: `aws/config/subscription-policy.json` →
+`max_subscriptions_per_user = 10`, passed to the API as `MAX_SUBSCRIPTIONS`. **Every record
+counts** — active, paused and expired, including existing M1 rows. Pause doesn't release a slot,
+resume doesn't consume one, expiry doesn't release one; only delete releases one. The UI shows
+「我的航線訂閱：X / 10」.
+
+Enforcement is strict under concurrency: a per-user record in a separate `subscription_quota`
+table (`count`, `version`) is updated, with a `version` condition, in the same transaction as
+every create and delete. The handler reads the quota version **first** and the strongly
+consistent row count **second**, retries a failed version condition at most 3 times with bounded
+jittered backoff, then returns `409 conflict`. Users with no quota record (all M1 users) get one
+on their first create/delete via `attribute_not_exists`. Edits, month changes, pause/resume and
+route changes don't change the count and don't touch the quota. The legacy `POST /subscribe`
+is served by the same code path after cutover (D14). Details and the concurrency matrix:
+`docs/api/m1.4-subscriptions-api.md` §5; executable model and interleaving tests:
+`aws/reference/subscriptions_quota.py`, `aws/tests/test_m14_quota_model.py`.
 
 ### D5. Route changes are a transaction
 Changing origin/destination changes the sort key, so it is one `TransactWriteItems`:
 `Delete(old, condition attribute_exists)` + `Put(new, condition attribute_not_exists)`.
 Duplicates are impossible (the `Put` condition fails → `409 duplicate_subscription`);
 a vanished source row → `404`; a stale client (`if_updated_at` mismatch) → `409 conflict`.
-Creating uses `PutItem` with `attribute_not_exists` for the same reason. Target/pause edits are
-single `UpdateItem`s with `attribute_exists`.
+Creating uses a `Put` with `attribute_not_exists` (plus the quota update, D4) for the same
+reason. Target, month and pause edits are single `UpdateItem`s with `attribute_exists`.
 
 ### D6. Notification history is never changed by the subscriptions API
 History is keyed `{email}#{route}`; the API's IAM role has **no access** to that table.
@@ -57,6 +69,8 @@ History is keyed `{email}#{route}`; the API's IAM role has **no access** to that
 | User action | Effect on alerts |
 |---|---|
 | Change target price | Same key; the 24 h floor / re-alert rules still apply to the last alert |
+| Change departure month | Same key; within 24 h of the last alert the new month alerts only if ≥ 20 % / ≥ NT$2,000 cheaper than the last alerted price, else after the 24 h floor (≤ 24 h delay) |
+| Expire / reactivate | Expired rows are skipped; reactivating keeps the key, so normal dedup applies |
 | Pause → resume | Same key; dedup continues from the last alert (no instant repeat) |
 | Delete | History kept |
 | Delete then re-create the same route | Same key, so dedup applies (stops delete/re-create alert spam) |
@@ -74,14 +88,16 @@ run. Decided after the M1 email test; M1 behaviour is unchanged until then.
 ### D8. Travelpayouts v3 migration is gated and side-by-side
 `/v1/prices/cheap` is documented as outdated; the replacement is
 `/aviasales/v3/prices_for_dates`. v3 defaults to **one-way** (`one_way=true`), so the parser
-must send `one_way=false` explicitly to keep today's round-trip semantics. Neither endpoint is
+must send `one_way=false` explicitly to keep today's round-trip semantics, and must validate
+that each accepted offer has a `return_at` and a `departure_at` inside the requested
+(effective) month. Neither endpoint is
 called with `market` today (default `ru`); that stays unchanged during migration. The switch
 is behind a `FARE_API=v1|v3` setting (default v1) and happens only after a dry-run comparison
 passes (see the plan, Phase 2).
 
 ### D9. Least-privilege roles
-A new `flight-subscriptions-api-role` (DynamoDB `subscriptions` only; no SSM, KMS, SQS,
-Lambda or `notification_history`). The Travelpayouts and Resend keys stay readable only by
+A new `flight-subscriptions-api-role` (DynamoDB `subscriptions` and `subscription_quota` only;
+no SSM, KMS, SQS, Lambda or `notification_history`). The Travelpayouts and Resend keys stay readable only by
 the fare-check and notification functions. Design files: `aws/iam/`.
 
 ### D10. Deployment via GitHub Actions + AWS OIDC with manual approval
@@ -97,6 +113,35 @@ Cost: about US$0.20 per GB-month of table size (AWS's example rate) plus about U
 restored; both tables are under 1 KB, so effectively US$0.00/month. The retention period
 doesn't change the price.
 
+### D12. Departure month per subscription
+Owner decision 2026-11-05. The user picks one departure month from the **next 12 calendar
+months starting next month** (Asia/Taipei); the default is next month; it is stored as
+`departure_month = "YYYY-MM"` and can be edited. A fixed month that has passed makes the row
+**expired** (derived at read/check time, never written by a job): no fare checks, no
+notifications, shown as 「已過期」, still counted (D4); choosing a new month in the window
+reactivates it. Existing M1 rows have no month and stay **rolling** (checked for next month,
+as today); they are never converted automatically, and become fixed only when the user picks a
+month. The API reports `month_mode` (`fixed`/`rolling`) and `effective_month`. The fare check
+groups work by `(origin, destination, effective_month)`, so each month gets its own result and
+one Travelpayouts lookup serves every subscriber of that group (plan, Phase 2).
+
+### D13. Prototype route is fail-closed
+`/prototype/subscriptions` is compiled in only for the local dev server (`vite`, `vercel dev`)
+and Vercel **preview** builds (`VERCEL_ENV === "preview"`, exact match). Production is excluded
+whatever any variable says; unset or unknown environments (a local `vite build`, other hosts,
+custom Vercel environments) are excluded. The decision is made at build time by
+`src/lib/prototype-flag.ts` and injected as a constant, so a production bundle contains neither
+the route nor the page.
+
+### D14. Deployment order: nothing user-reachable before the fare check supports it
+The deployed parser checks next month for every row and ignores pause and month. Therefore the
+new API's routes are not publicly reachable until the wrapper/parser support dynamic routes,
+fixed months, paused and expired rows, the quota, and the unchanged notification message
+format. At cutover one reviewed change set points `POST /subscribe`, `GET /subscriptions` and
+the new routes at the new handler together, so no quota-unaware writer runs alongside it.
+Phase 1B (API stack) and Phase 2 (fare check) may ship as separate change sets only if the new
+routes stay unattached/inaccessible in between; otherwise they ship together.
+
 ## Alternatives considered
 
 - **New table / composite key with a subscription ID** (allow several targets per route):
@@ -104,6 +149,10 @@ doesn't change the price.
 - **Counter item inside the `subscriptions` table**: exact, but the deployed M1.1 list Lambda
   and the parser read every row and would break on a non-subscription row. Rejected in favour of
   the separate `subscription_quota` table.
+- **Active-only limit** (paused rows free a slot): rejected by the owner; a total limit is simpler
+  to explain and keeps resume from ever failing.
+- **Departure month in the sort key** (several months per route): more flexible, but changes the
+  dedup key and needs a migration. Rejected; one month per route pair.
 - **Free-text airport search (Travelpayouts autocomplete)**: better UX, but unpopular routes
   often have no cached fares. Deferred until the allowlist proves out.
 - **Keep inline CloudFormation code**: no new infrastructure, but the notification code is
@@ -112,7 +161,10 @@ doesn't change the price.
 
 ## Consequences
 
-- No data migration; the two existing subscriptions and all history keep working unchanged.
+- No data migration; the two existing subscriptions stay rolling and keep alerting as today, and
+  all history keeps working unchanged.
+- A month change can delay the first alert for the new month by up to 24 h (D6); accepted to
+  keep the notification Lambda unchanged.
 - The notification Lambda needs no change for new routes (it shows unknown city codes as the
   bare code until `CITIES` is extended, a settings-only change after M1 closes).
 - One-time IAM bootstrap (OIDC provider, three roles, artifacts bucket) needs owner approval.

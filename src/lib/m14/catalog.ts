@@ -14,18 +14,28 @@ export interface Airport {
 }
 
 export interface SubscriptionPolicy {
-  maxActive: number;
+  /** Maximum subscription records per user: active, paused and expired all count. */
+  maxSubscriptions: number;
   minTarget: number;
   maxTarget: number;
+  /** Selectable departure months start this many months after the current month... */
+  firstMonthOffset: number;
+  /** ...and span this many calendar months. */
+  monthWindow: number;
+  /** The calendar used to decide "current month" (and therefore expiry). */
+  timeZone: string;
 }
 
 export const ORIGINS: readonly Airport[] = airportsConfig.origins as Airport[];
 export const DESTINATIONS: readonly Airport[] = airportsConfig.destinations as Airport[];
 
 export const POLICY: SubscriptionPolicy = {
-  maxActive: policyConfig.max_active_subscriptions_per_user,
+  maxSubscriptions: policyConfig.max_subscriptions_per_user,
   minTarget: policyConfig.target_price_twd.min,
   maxTarget: policyConfig.target_price_twd.max,
+  firstMonthOffset: policyConfig.departure_month.first_offset_months,
+  monthWindow: policyConfig.departure_month.window_months,
+  timeZone: policyConfig.departure_month.timezone,
 };
 
 const byCode = new Map<string, Airport>([...ORIGINS, ...DESTINATIONS].map((a) => [a.code, a]));

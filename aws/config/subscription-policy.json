@@ -1,10 +1,16 @@
 {
-  "schema_version": 1,
-  "max_active_subscriptions_per_user": 10,
+  "schema_version": 2,
+  "max_subscriptions_per_user": 10,
   "target_price_twd": {
     "min": 1,
     "max": 1000000
   },
   "currency": "TWD",
-  "notes": "Read by the M1.4 subscriptions API (passed as environment variables at deploy time). Paused subscriptions do not count toward the active limit."
+  "departure_month": {
+    "format": "YYYY-MM",
+    "first_offset_months": 1,
+    "window_months": 12,
+    "timezone": "Asia/Taipei"
+  },
+  "notes": "Read by the M1.4 subscriptions API (passed as environment variables at deploy time). The limit counts every subscription record (active, paused and expired); only deleting frees a slot. Selectable departure months are the 12 calendar months starting next month (Asia/Taipei). Rows without departure_month are legacy M1 rolling next-month subscriptions."
 }

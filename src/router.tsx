@@ -7,9 +7,10 @@ import SignIn from "./pages/SignIn";
 import SignUp from "./pages/SignUp";
 import PrototypeSubscriptions from "./pages/PrototypeSubscriptions";
 
-// M1.4 prototype (mock data only). Registered in local dev and Vercel preview builds; Vercel
-// production builds set VITE_M14_PROTOTYPE=false (vite.config.ts), so the route doesn't exist there.
-export const M14_PROTOTYPE_ENABLED = import.meta.env.VITE_M14_PROTOTYPE !== "false";
+// M1.4 prototype (mock data only). Fail-closed: the route exists only when the build set
+// VITE_M14_PROTOTYPE to exactly "true" (dev server and Vercel preview builds; see
+// src/lib/prototype-flag.ts and vite.config.ts). Unset or any other value means no route.
+export const M14_PROTOTYPE_ENABLED = import.meta.env.VITE_M14_PROTOTYPE === "true";
 export const M14_PROTOTYPE_PATH = "prototype/subscriptions";
 
 export const routes: RouteObject[] = [

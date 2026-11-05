@@ -7,7 +7,6 @@ import { RouteForm } from "@/components/m14/RouteForm";
 import { SubscriptionItem } from "@/components/m14/SubscriptionItem";
 import { POLICY } from "@/lib/m14/catalog";
 import {
-  activeCount,
   demoSubscriptions,
   errorMessage,
   reducer,
@@ -20,7 +19,7 @@ import { usePageMeta } from "@/lib/page-meta";
  * M1.4 preview-only prototype. Local mock data and component state only: it never calls the
  * subscription API, Supabase or AWS, and it is not linked from the production site.
  */
-export default function PrototypeSubscriptions() {
+export default function PrototypeSubscriptions({ now = () => new Date() }: { now?: () => Date }) {
   usePageMeta({
     title: "訂閱管理原型（預覽）— Flight Price Notifier",
     description: "M1.4 自訂航線訂閱原型，僅供預覽。",
@@ -29,10 +28,10 @@ export default function PrototypeSubscriptions() {
   const [state, dispatch] = useReducer(
     (s: State, a: Action) => reducer(s, a),
     undefined,
-    (): State => ({ subs: demoSubscriptions(), lastError: null }),
+    (): State => ({ subs: demoSubscriptions(now()), lastError: null }),
   );
-  const now = () => new Date().toISOString();
-  const active = activeCount(state.subs);
+  const today = now();
+  const stamp = () => now().toISOString();
 
   return (
     <div className="flex min-h-screen flex-col bg-hero">
@@ -58,14 +57,15 @@ export default function PrototypeSubscriptions() {
         <div className="animate-fade-up rounded-2xl border border-border bg-card p-6 sm:p-8">
           <h1 className="text-2xl font-bold sm:text-3xl">自訂航線訂閱</h1>
           <p className="mt-2 text-muted-foreground">
-            選擇出發地與目的地，設定目標價，票價達標時寄 email 通知你。
+            選擇出發地、目的地與出發月份，設定目標價，票價達標時寄 email 通知你。
           </p>
           <div className="mt-6">
             <h2 className="mb-3 text-lg font-semibold">新增訂閱</h2>
             <RouteForm
               subs={state.subs}
+              now={today}
               submitLabel="開始追蹤"
-              onSubmit={(value) => dispatch({ type: "create", value, now: now() })}
+              onSubmit={(value) => dispatch({ type: "create", value, now: stamp() })}
             />
           </div>
         </div>
@@ -76,7 +76,7 @@ export default function PrototypeSubscriptions() {
               我的訂閱
             </h2>
             <p className="text-sm text-muted-foreground" aria-live="polite">
-              追蹤中 {active} / {POLICY.maxActive} · 共 {state.subs.length} 筆
+              我的航線訂閱：{state.subs.length} / {POLICY.maxSubscriptions}
             </p>
           </div>
 
@@ -85,7 +85,7 @@ export default function PrototypeSubscriptions() {
               role="alert"
               className="mb-3 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm"
             >
-              {errorMessage(state.lastError.code)}
+              {errorMessage(state.lastError.code, { now: today })}
             </p>
           )}
 
@@ -100,11 +100,12 @@ export default function PrototypeSubscriptions() {
                   key={sub.route}
                   sub={sub}
                   subs={state.subs}
+                  now={today}
                   onEdit={(value) =>
-                    dispatch({ type: "edit", route: sub.route, value, now: now() })
+                    dispatch({ type: "edit", route: sub.route, value, now: stamp() })
                   }
-                  onPause={() => dispatch({ type: "pause", route: sub.route, now: now() })}
-                  onResume={() => dispatch({ type: "resume", route: sub.route, now: now() })}
+                  onPause={() => dispatch({ type: "pause", route: sub.route, now: stamp() })}
+                  onResume={() => dispatch({ type: "resume", route: sub.route, now: stamp() })}
                   onDelete={() => dispatch({ type: "delete", route: sub.route })}
                 />
               ))}
@@ -115,7 +116,7 @@ export default function PrototypeSubscriptions() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => dispatch({ type: "reset", subs: demoSubscriptions() })}
+              onClick={() => dispatch({ type: "reset", subs: demoSubscriptions(now()) })}
             >
               重設示範資料
             </Button>
