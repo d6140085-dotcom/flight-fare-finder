@@ -47,6 +47,9 @@ destinations) `region`; the file also carries `regions` (display order and names
   records only: code exists in the stated country, airports are airports, city codes are city
   codes and each listed airport belongs to that city) with `aws/tools/verify_airports.py`,
   which future expansions must re-run.
+- The origin `TPE` is the Taipei city code (`airports: ["TPE", "TSA"]`, Taoyuan + Songshan),
+  as M1 already uses it. Because `TPE` is also Taoyuan's airport code, Phase 2 must confirm in
+  `DRY_RUN` that Travelpayouts applies city semantics (plan: "Origin TPE", checks T1–T5).
 - The API validates against the file server-side; the front end reads the same file at build
   time. Expanding = editing the file and re-running the check (no schema change).
 - **The catalog is only an allowlist.** It never drives fare queries: the fare check looks up

@@ -204,6 +204,16 @@ class AirportsConfigTests(unittest.TestCase):
         self.assertTrue({"GB", "FR", "DE", "NL", "CH", "AT", "IT", "ES", "PT", "CZ", "HU", "DK", "SE",
                          "NO", "FI", "IE", "GR", "TR"} <= countries)
 
+    def test_tpe_origin_is_the_taipei_city_code(self):
+        # TPE = Taipei city (Taoyuan TPE + Songshan TSA), as M1 already sends it; TSA is not
+        # offered on its own. Travelpayouts semantics are checked in Phase 2 (plan T1–T5).
+        tpe = next(a for a in self.cfg["origins"] if a["code"] == "TPE")
+        self.assertEqual((tpe["type"], tpe["airports"]), ("city", ["TPE", "TSA"]))
+        codes = {a["code"] for a in self.cfg["origins"] + self.cfg["destinations"]}
+        self.assertNotIn("TSA", codes)
+        for code in ("KHH", "RMQ"):
+            self.assertEqual(next(a for a in self.cfg["origins"] if a["code"] == code)["type"], "airport")
+
     def test_city_and_airport_codes_do_not_overlap(self):
         # An airport searched by a city entry must not also be its own destination entry
         # (e.g. TYO and HND), or the same flights would be offered twice.
