@@ -80,8 +80,12 @@ the function to force a cold start (the parameter is cached per container).
 
 ## M1.4 (planned)
 
-- `aws/config/airports.json`: curated origin/destination allowlist (schema_version 1).
-- `aws/config/subscription-policy.json`: 10 active subscriptions per user, TWD target range.
+- `aws/config/airports.json`: curated origin/destination allowlist (schema_version 2: 95
+  destinations in seven regions, city vs airport codes). Re-verify after editing:
+  `python3 aws/tools/verify_airports.py optd_por_public.csv` (OpenTravelData reference file).
+- `aws/config/subscription-policy.json`: 10 total subscription records per user, TWD target
+  range, 12-month departure window.
+- `aws/reference/subscriptions_quota.py`: executable model of the strict quota protocol.
 - `aws/iam/`: least-privilege IAM **design** documents for GitHub Actions + OIDC deployment and
   the subscriptions API role. Not deployed.
 - Plan: `docs/m1.4-plan.md`; decisions: `docs/adr/0001-m1-4-dynamic-routes.md`;
