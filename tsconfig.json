@@ -18,6 +18,7 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": false,
     "noEmit": true,
+    "resolveJsonModule": true,
 
     "skipLibCheck": true,
     "strict": true,

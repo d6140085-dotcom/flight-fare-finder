@@ -24,4 +24,10 @@ export default defineConfig({
   build: {
     outDir: "dist",
   },
+  // M1.4 prototype page: on in local dev and Vercel preview builds, off in Vercel production.
+  define: {
+    "import.meta.env.VITE_M14_PROTOTYPE": JSON.stringify(
+      process.env["VERCEL_ENV"] === "production" ? "false" : "true",
+    ),
+  },
 });

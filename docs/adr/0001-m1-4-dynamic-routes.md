@@ -38,8 +38,10 @@ reads the same file at build time. Expanding = editing the file (no schema chang
 ### D4. Configurable active-subscription limit
 `aws/config/subscription-policy.json`: `max_active_subscriptions_per_user = 10`, passed to the
 API as an environment variable. Paused subscriptions don't count; resuming re-checks the limit.
-Enforcement: count with a strongly consistent `Query` before create/resume. A user racing
-their own requests could briefly exceed the limit by one; accepted (see Alternatives).
+Enforcement (updated 2026-11-05, owner decision: **strict**): a per-user record in a separate
+`subscription_quota` table is updated in the same transaction as every write that changes the
+active count, guarded by a version condition, so concurrent requests can't exceed the limit.
+Details: `docs/api/m1.4-subscriptions-api.md` §5.
 
 ### D5. Route changes are a transaction
 Changing origin/destination changes the sort key, so it is one `TransactWriteItems`:
@@ -99,8 +101,9 @@ doesn't change the price.
 
 - **New table / composite key with a subscription ID** (allow several targets per route):
   more flexible but needs a migration and changes the dedup key. Rejected for M1.4.
-- **Strict limit via a per-user counter item** in the same transaction: exact, but adds a
-  non-route row that every scan/list must skip. Deferred; revisit if abuse appears.
+- **Counter item inside the `subscriptions` table**: exact, but the deployed M1.1 list Lambda
+  and the parser read every row and would break on a non-subscription row. Rejected in favour of
+  the separate `subscription_quota` table.
 - **Free-text airport search (Travelpayouts autocomplete)**: better UX, but unpopular routes
   often have no cached fares. Deferred until the allowlist proves out.
 - **Keep inline CloudFormation code**: no new infrastructure, but the notification code is
