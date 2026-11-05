@@ -4,6 +4,15 @@ Region **ap-southeast-2**, account resources shared by all M1 Lambdas via the ex
 `flight-lambda-role`. Secrets live in **SSM Parameter Store** (SecureString), never in code or logs:
 `/flight/travelpayouts`, `/flight/resend`, `/github/pat`.
 
+## Part 1.1 — subscribe API
+
+Stack `flight-m1-subscribe-api` (HTTP API `flight-api`: `POST /subscribe`, `GET /subscriptions`)
+with Lambdas `flight-save-subscription` and `flight-list-subscriptions`. Their source is in
+`aws/lambdas/` and `aws/stacks/build_m1_subscribe_api.py` reproduces the deployed template
+byte-for-byte. The Supabase URL and publishable key are build inputs
+(`SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`), not committed values. Both Lambdas identify the
+user from the Supabase session token; direct IAM invokes may pass `test_email` for testing.
+
 ## Part 1.2 — fetch prices on a schedule
 
 | Resource | Name | Managed by |
@@ -68,3 +77,12 @@ address (others get `403`; `example.com` addresses get `422`). Verify a domain (
 Redeploy: `python3 aws/stacks/build_m1_email_on_target.py <account-id> > template.json`, then
 update stack `flight-m1-email-on-target`. After changing `/flight/resend`, change any env var on
 the function to force a cold start (the parameter is cached per container).
+
+## M1.4 (planned)
+
+- `aws/config/airports.json`: curated origin/destination allowlist (schema_version 1).
+- `aws/config/subscription-policy.json`: 10 active subscriptions per user, TWD target range.
+- `aws/iam/`: least-privilege IAM **design** documents for GitHub Actions + OIDC deployment and
+  the subscriptions API role. Not deployed.
+- Plan: `docs/m1.4-plan.md`; decisions: `docs/adr/0001-m1-4-dynamic-routes.md`;
+  deployment design: `docs/deploy/github-actions-oidc.md`.
