@@ -200,8 +200,36 @@ class AuthTests(unittest.TestCase):
 
     def test_direct_invoke_only_when_enabled(self):
         event = {"routeKey": "GET /subscriptions", "test_email": USER}
-        self.assertIsNone(resolve_email(event, ENV))
-        self.assertEqual(resolve_email(event, {**ENV, "ALLOW_DIRECT_TEST_INVOKE": "true"}), USER)
+        self.assertIsNone(resolve_email(event, ENV))  # disabled by default
+        on = {**ENV, "ALLOW_DIRECT_TEST_INVOKE": "true", "AWS_LAMBDA_FUNCTION_NAME": "flight-subscriptions-api-test"}
+        self.assertEqual(resolve_email(event, on), USER)
+        for flag in ("TRUE", "True", "1", "yes", " true", ""):
+            self.assertIsNone(resolve_email(event, {**on, "ALLOW_DIRECT_TEST_INVOKE": flag}), flag)
+
+    def test_production_function_never_accepts_test_mode(self):
+        prod = {**ENV, "ALLOW_DIRECT_TEST_INVOKE": "true", "AWS_LAMBDA_FUNCTION_NAME": "flight-subscriptions-api"}
+        self.assertIsNone(resolve_email({"test_email": USER}, prod))
+
+    def test_test_mode_cannot_act_as_a_real_user(self):
+        on = {**ENV, "ALLOW_DIRECT_TEST_INVOKE": "true", "AWS_LAMBDA_FUNCTION_NAME": "x-test"}
+        for email in ("someone@mail-provider.io", "user@example.com.evil.io", "user@notexample.com", "@example.com",
+                      "example.com", "a@b@example.com", "a b@example.com", "a@.example.com", None, 123):
+            self.assertIsNone(resolve_email({"test_email": email}, on), email)
+        for email in ("a@example.org", "b@example.net", "c@qa.test", "D@Example.COM"):
+            self.assertIsNotNone(resolve_email({"test_email": email}, on), email)
+
+    def test_api_gateway_events_can_never_use_test_mode(self):
+        on = {**ENV, "ALLOW_DIRECT_TEST_INVOKE": "true", "AWS_LAMBDA_FUNCTION_NAME": "x-test"}
+
+        def deny(req, timeout):
+            raise urllib.error.HTTPError(req.full_url, 401, "no", {}, None)
+
+        for ctx in ({"http": {}}, {}, None):
+            event = {**apigw("GET /subscriptions"), "requestContext": ctx, "test_email": USER}
+            self.assertIsNone(resolve_email(event, on, deny))  # goes to Supabase, which says no
+        event = {**apigw("GET /subscriptions", token=None), "test_email": USER}
+        self.assertIsNone(resolve_email(event, on, deny))
+        self.assertIsNone(resolve_email("not-a-dict", on, deny))
 
     def test_refuses_secret_keys_and_plain_http(self):
         for bad in ({**ENV, "SUPABASE_PUBLISHABLE_KEY": "sb_secret_x"}, {**ENV, "SUPABASE_URL": "http://x"}):
@@ -243,6 +271,21 @@ class PackagingTests(unittest.TestCase):
             self.assertFalse([n for n in names if "__pycache__" in n or n.endswith(".pyc") or "test" in n])
             self.assertTrue(all(i.date_time == (1980, 1, 1, 0, 0, 0) for i in z.infolist()))
 
+    def test_zip_contains_no_secrets(self):
+        import re
+        import zipfile
+
+        out = self.pkg.build(self.tmp / "s")
+        patterns = [r"sb_secret_", r"sb_publishable_[A-Za-z0-9_-]{8,}", r"AKIA[0-9A-Z]{16}", r"ghp_[A-Za-z0-9]{20}",
+                    r"github_pat_", r"\bre_[A-Za-z0-9]{16,}", r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+                    r"aws_secret_access_key", r"@(gmail|yahoo|hotmail|outlook)\.com"]
+        with zipfile.ZipFile(out["zip"]) as z:
+            self.assertFalse([n for n in z.namelist() if n.startswith(".") or "/." in n or n.endswith(".env")])
+            for name in z.namelist():
+                text = z.read(name).decode("utf-8")
+                for pat in patterns:
+                    self.assertIsNone(re.search(pat, text), f"{name}: {pat}")
+
     def test_packaged_config_is_what_the_handler_loads(self):
         import zipfile
 
@@ -254,13 +297,37 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(len(config_mod.load().destinations), 95)
 
 
+class PlanScriptTests(unittest.TestCase):
+    def setUp(self):
+        self.text = (API_DIR.parents[1] / "scripts" / "plan_m14_subscriptions_api.sh").read_text()
+
+    def test_cannot_execute_or_deploy(self):
+        for forbidden in ("execute-change-set", "create-stack", "update-stack", "delete-stack",
+                          "cloudformation deploy", "lambda update-function", "eval "):
+            self.assertNotIn(forbidden, self.text)
+
+    def test_dry_run_by_default_and_explicit_confirmation(self):
+        self.assertIn('if [[ "$MODE" != "--create-change-set" ]]', self.text)
+        self.assertIn('[[ "${CONFIRM:-}" == "create-change-set" ]]', self.text)
+        dry = self.text.index('if [[ "$MODE" != "--create-change-set" ]]')
+        self.assertLess(dry, self.text.index("\nupload\n"))  # nothing runs before the dry-run exit
+        self.assertIn("--change-set-type CREATE", self.text)
+
+    def test_write_once_traceable_artifact_from_a_clean_commit(self):
+        self.assertIn("--if-none-match '*'", self.text)
+        self.assertIn("--checksum-sha256", self.text)
+        self.assertIn('KEY="artifacts/flight-subscriptions-api/${COMMIT}/${SHA_HEX}.zip"', self.text)
+        self.assertIn("git status --porcelain", self.text)
+
+
 class TemplateTests(unittest.TestCase):
     def setUp(self):
         spec = importlib.util.spec_from_file_location(
             "b14", API_DIR.parents[1] / "stacks" / "build_m14_subscriptions_api.py")
         self.b = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.b)
-        self.t = self.b.template("379959319681", "artifacts/flight-subscriptions-api/x.zip",
+        self.commit, self.sha = "a" * 40, "b" * 64
+        self.t = self.b.template("379959319681", self.commit, self.sha, "c2hhMjU2PQ==",
                                  "https://example.supabase.co", "sb_publishable_example")
 
     def test_no_routes_and_nothing_existing_is_touched(self):
@@ -279,14 +346,29 @@ class TemplateTests(unittest.TestCase):
         f = self.t["Resources"]["Function"]["Properties"]
         self.assertEqual(f["Role"], "arn:aws:iam::379959319681:role/flight-subscriptions-api-role")
         self.assertEqual(f["Code"], {"S3Bucket": "flight-artifacts-379959319681",
-                                     "S3Key": "artifacts/flight-subscriptions-api/x.zip"})
+                                     "S3Key": f"artifacts/flight-subscriptions-api/{self.commit}/{self.sha}.zip"})
         env = f["Environment"]["Variables"]
         self.assertEqual((env["SUBSCRIPTIONS_TABLE"], env["QUOTA_TABLE"]), ("subscriptions", "subscription_quota"))
         self.assertNotIn("ALLOW_DIRECT_TEST_INVOKE", env)
+        self.assertEqual(f["FunctionName"], "flight-subscriptions-api")  # = auth.PRODUCTION_FUNCTION
+        from subsapi.auth import PRODUCTION_FUNCTION
+        self.assertEqual(f["FunctionName"], PRODUCTION_FUNCTION)
+
+    def test_artifact_is_traceable_and_immutable(self):
+        f = self.t["Resources"]["Function"]["Properties"]
+        tags = {t["Key"]: t["Value"] for t in f["Tags"]}
+        self.assertEqual((tags["git_commit"], tags["code_sha256"]), (self.commit, "c2hhMjU2PQ=="))
+        self.assertIn(self.commit[:12], f["Description"])
+        self.assertEqual(self.t["Outputs"]["GitCommit"]["Value"], self.commit)
+        for bad_commit, bad_sha in (("abc", self.sha), (self.commit, "zz"), ("A" * 40, self.sha)):
+            with self.assertRaises(ValueError):
+                self.b.artifact_key(bad_commit, bad_sha)
 
     def test_rejects_secret_keys(self):
         with self.assertRaises(ValueError):
-            self.b.template("1", "k", "https://x.supabase.co", "sb_secret_abc")
+            self.b.template("1", self.commit, self.sha, "x", "https://x.supabase.co", "sb_secret_abc")
+        with self.assertRaises(ValueError):
+            self.b.template("1", self.commit, self.sha, "x", "http://x.supabase.co", "sb_publishable_x")
 
     def test_pipeline_can_create_only_the_quota_table(self):
         policy = json.loads((API_DIR.parents[1] / "iam" / "cfn-exec-policy.json").read_text())
@@ -661,6 +743,214 @@ class LegacySubscribeTests(LocalDynamoTestCase):
         self.assertEqual(self.legacy("osaka")[1]["error"], "invalid_plan")
         self.assertEqual(self.legacy("tokyo", 0)[1]["error"], "invalid_target_price")
         self.assertEqual(self.call("POST /subscribe", raw="[]")[1]["error"], "invalid_json")
+
+
+class HandlerSecurityTests(LocalDynamoTestCase):
+    """The real resolve_email (Supabase path) behind the handler, with a fake Supabase."""
+
+    def setUp(self):
+        super().setUp()
+        self.auth.stop()
+        import functools
+        from subsapi import auth as auth_mod
+
+        def supabase(req, timeout):
+            token = req.headers.get("Authorization", "")[7:]
+            if token not in TOKENS:
+                raise urllib.error.HTTPError(req.full_url, 401, "invalid JWT", {}, None)
+            return FakeResponse(json.dumps({"email": TOKENS[token], "aud": "authenticated"}).encode())
+
+        self.auth = mock.patch.object(self.index, "resolve_email",
+                                      functools.partial(auth_mod.resolve_email, opener=supabase))
+        self.auth.start()
+        self.env = mock.patch.dict(os.environ, ENV)
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        super().tearDown()
+
+    ROUTES = [("GET /subscriptions", None, None), ("POST /subscriptions", {"origin": "TPE", "destination": "LON",
+              "departure_month": "2027-01", "target_price": 1}, None),
+              ("PATCH /subscriptions/{route}", {"target_price": 1}, {"route": "TPE-LON"}),
+              ("DELETE /subscriptions/{route}", None, {"route": "TPE-LON"}),
+              ("POST /subscribe", {"plan_name": "tokyo", "target_price": 1}, None)]
+
+    def test_every_operation_requires_a_valid_session(self):
+        self.seed(USER, "TPE-LON", departure_month="2027-01")
+        before = self.raw()
+        for key, body, path in self.ROUTES:
+            for token in (None, "forged", ""):
+                status, out = self.call(key, body, path=path, token=token)
+                self.assertEqual((status, out["error"]), (401, "unauthorized"), (key, token))
+        self.assertEqual(self.raw(), before)
+        self.assertIsNone(self.quota())
+
+    def test_direct_invocation_is_anonymous_in_production(self):
+        prod = {"ALLOW_DIRECT_TEST_INVOKE": "true", "AWS_LAMBDA_FUNCTION_NAME": "flight-subscriptions-api"}
+        with mock.patch.dict(os.environ, prod):
+            r = self.index.handler({"routeKey": "POST /subscriptions", "test_email": USER,
+                                    "body": {"origin": "TPE", "destination": "LON", "departure_month": "2027-01",
+                                             "target_price": 1}}, None)
+        self.assertEqual(r["statusCode"], 401)
+        self.assertEqual(self.raw(), {})
+
+    def test_api_gateway_request_cannot_switch_on_test_mode(self):
+        with mock.patch.dict(os.environ, {"ALLOW_DIRECT_TEST_INVOKE": "true", "AWS_LAMBDA_FUNCTION_NAME": "x-test"}):
+            event = apigw("GET /subscriptions", token="forged")
+            event["test_email"] = USER
+            r = self.index.handler(event, None)
+        self.assertEqual(r["statusCode"], 401)
+
+    def test_no_access_to_another_users_rows(self):
+        self.seed(OTHER, "TPE-LON", departure_month="2027-01")
+        theirs = self.raw(OTHER)
+        self.assertEqual(self.call("GET /subscriptions")[1]["subscriptions"], [])
+        self.assertEqual(self.patch("TPE-LON", {"target_price": 1, "email": OTHER})[0], 404)
+        self.assertEqual(self.call("DELETE /subscriptions/{route}", path={"route": "TPE-LON"},
+                                   query={"email": OTHER})[0], 404)
+        status, body = self.create("LON")  # creates the caller's own row, not theirs
+        self.assertEqual(status, 201)
+        self.assertEqual(self.raw(OTHER), theirs)
+        self.assertEqual(sorted(self.raw(USER)), ["TPE-LON"])
+
+
+class TransactionShapeTests(LocalDynamoTestCase):
+    """Records every TransactWriteItems the handler sends and checks its shape."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        real = self.client.transact_write_items
+
+        def spy(**kw):
+            self.calls.append(kw)
+            return real(**kw)
+
+        self.spy = mock.patch.object(self.client, "transact_write_items", side_effect=spy)
+        self.spy.start()
+
+    def tearDown(self):
+        self.spy.stop()
+        super().tearDown()
+
+    def kinds(self, call):
+        return [(op, body["TableName"], body.get("ConditionExpression")) for item in call["TransactItems"]
+                for op, body in item.items()]
+
+    def assert_well_formed(self, call):
+        import uuid as _uuid
+        _uuid.UUID(call["ClientRequestToken"])  # idempotency token on every transaction
+        targets = [self.Store._target(i) for i in call["TransactItems"]]
+        self.assertEqual(len(targets), len(set(targets)), "two operations on one item")
+
+    def test_create_and_delete_always_update_the_quota_version(self):
+        self.seed(USER, "TPE-TYO", plan_name="tokyo")  # M1 user, no quota record
+        self.create("LON")  # first write: quota created with attribute_not_exists
+        self.create("PAR")  # then version-checked
+        self.delete("TPE-TYO")  # deleting an M1 row is quota-checked too
+        self.call("POST /subscribe", {"plan_name": "seoul", "target_price": 1})  # legacy create
+        self.assertEqual([self.kinds(c) for c in self.calls], [
+            [("Put", self.subs_table, "attribute_not_exists(email)"),
+             ("Update", self.quota_table, "attribute_not_exists(email)")],
+            [("Put", self.subs_table, "attribute_not_exists(email)"), ("Update", self.quota_table, "#v = :v")],
+            [("Delete", self.subs_table, "attribute_exists(email)"), ("Update", self.quota_table, "#v = :v")],
+            [("Put", self.subs_table, "attribute_not_exists(email)"), ("Update", self.quota_table, "#v = :v")],
+        ])
+        for c in self.calls:
+            self.assert_well_formed(c)
+        self.assertEqual(self.quota(), {**self.quota(), "count": 3, "version": 4})  # TYO deleted; SEL, LON, PAR
+        self.assert_invariants()
+
+    def test_route_change_is_one_transaction_without_the_quota(self):
+        self.create("LON")
+        self.calls.clear()
+        self.patch("TPE-LON", {"origin": "KHH", "destination": "LON"})
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual([k[:2] for k in self.kinds(self.calls[0])],
+                         [("Delete", self.subs_table), ("Put", self.subs_table)])
+        self.assert_well_formed(self.calls[0])
+
+    def test_edits_pause_and_legacy_updates_are_not_transactions(self):
+        self.create("TYO")
+        self.calls.clear()
+        self.patch("TPE-TYO", {"target_price": 5, "alerts_paused": True, "departure_month": "2027-05"})
+        self.call("POST /subscribe", {"plan_name": "tokyo", "target_price": 6})
+        self.assertEqual(self.calls, [])  # single conditional UpdateItems; the count can't change
+
+    def test_two_operations_on_one_item_are_refused_before_sending(self):
+        item = {"Put": {"TableName": self.subs_table, "Item": store_mod.to_item({"email": USER, "route": "A-B"})}}
+        with self.assertRaises(ValueError):
+            self.store._transact([item, {"Delete": {"TableName": self.subs_table,
+                                                    "Key": store_mod.to_item({"email": USER, "route": "A-B"})}}])
+        self.assertEqual(self.calls, [])
+
+    def test_parallel_first_writes_initialise_the_quota_once(self):
+        self.seed(USER, "TPE-TYO", plan_name="tokyo")
+        self.svc.sleep = time.sleep
+        barrier = threading.Barrier(50)
+
+        def go(d):
+            barrier.wait()
+            try:
+                return self.svc.create(USER, {"origin": "TPE", "destination": d, "departure_month": "2027-01",
+                                              "target_price": 1})[0]
+            except ApiError as e:
+                return e.code
+
+        with ThreadPoolExecutor(50) as pool:
+            list(pool.map(go, DESTS[:50]))
+        inits = [c for c in self.calls if ("Update", self.quota_table, "attribute_not_exists(email)") in self.kinds(c)]
+        self.assertGreaterEqual(len(inits), 1)
+        q = self.quota()
+        rows = self.raw()
+        self.assertEqual(q["count"], len(rows))
+        # Exactly one initialising transaction succeeded: every later version increments by one.
+        self.assertEqual(q["version"], len(rows) - 1)  # 1 for the init + one per later create; TYO pre-existed
+        self.assert_invariants()
+
+
+class RetryHandlingTests(LocalDynamoTestCase):
+    """How the service reacts to each TransactionCanceledException reason and other errors."""
+
+    body = {"origin": "TPE", "destination": "LON", "departure_month": "2027-01", "target_price": 1}
+
+    def run_create(self, *effects):
+        with mock.patch.object(self.store, "create", side_effect=list(effects)) as m:
+            try:
+                out = self.svc.create(USER, dict(self.body))[0]
+            except ApiError as e:
+                out = e.code
+        return out, m.call_count
+
+    def test_reasons(self):
+        Tx = store_mod.TxCancelled
+        self.assertEqual(self.run_create(Tx(["ConditionalCheckFailed", "None"])), ("duplicate_subscription", 1))
+        self.assertEqual(self.run_create(Tx(["None", "ConditionalCheckFailed"]), None), (201, 2))
+        self.assertEqual(self.run_create(Tx(["TransactionConflict", "None"]), None), (201, 2))
+        self.assertEqual(self.run_create(Tx(["None", "TransactionConflict"]), None), (201, 2))
+        self.assertEqual(self.run_create(Tx([]), Tx([]), Tx([])), ("conflict", 3))  # bounded: 3 attempts
+        self.assertEqual(len(self.sleeps), 0 + 1 + 1 + 1 + 2)  # one wait before each retry, none before attempt 1
+        self.assertTrue(all(0 <= s <= 0.2 for s in self.sleeps))
+
+    def test_conditional_check_failed_on_updates(self):
+        self.create("LON")
+        with mock.patch.object(self.store, "update", side_effect=store_mod.ConditionFailed()):
+            self.assertEqual(self.patch("TPE-LON", {"target_price": 2})[1]["error"], "conflict")
+
+    def test_cancellation_reasons_are_parsed_from_dynamodb(self):
+        self.create("LON")
+        with self.assertRaises(store_mod.TxCancelled) as e:
+            self.store.create(USER, {"route": "TPE-LON", "target_price": 1}, self.quota(), 2, "t")
+        self.assertEqual(e.exception.reasons[0], "ConditionalCheckFailed")
+
+    def test_other_dynamodb_errors_are_500_and_write_nothing(self):
+        from botocore.exceptions import ClientError
+        err = ClientError({"Error": {"Code": "ValidationException", "Message": "x"}}, "TransactWriteItems")
+        with mock.patch.object(self.client, "transact_write_items", side_effect=err):
+            status, body = self.create("LON")
+        self.assertEqual((status, body["error"]), (500, "internal_error"))
+        self.assertEqual(self.raw(), {})
 
 
 # =============================================================================================

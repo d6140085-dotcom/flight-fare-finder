@@ -5,6 +5,8 @@ Tables (names from the environment):
   subscriptions       PK email, SK route  — existing M1 table, unchanged schema
   subscription_quota  PK email; count, version — new in M1.4 (contract §5.1)
 """
+import json
+import uuid
 from decimal import Decimal
 
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
@@ -49,6 +51,10 @@ def to_item(d):
 
 def from_item(item):
     return {k: _plain(_de.deserialize(v)) for k, v in item.items()}
+
+
+def json_key(key):
+    return tuple(sorted((k, json.dumps(v, sort_keys=True)) for k, v in key.items()))
 
 
 def _vals(**kw):
@@ -102,9 +108,22 @@ class Store:
             op["ExpressionAttributeValues"] = _vals(c=new_count, nv=quota["version"] + 1, v=quota["version"], t=now)
         return {"Update": op}
 
+    @staticmethod
+    def _target(item):
+        (op, body), = item.items()
+        key = body["Key"] if "Key" in body else {k: body["Item"][k] for k in ("email", "route") if k in body["Item"]}
+        return body["TableName"], json_key(key)
+
     def _transact(self, items):
+        """One TransactWriteItems. Never two operations on the same item (DynamoDB rejects that
+        with ValidationException; we refuse it before sending). The ClientRequestToken makes an
+        SDK-level retry of the same call idempotent (a lost response can't turn our own commit
+        into a 'duplicate'); each application-level attempt uses a fresh token."""
+        targets = [self._target(i) for i in items]
+        if len(set(targets)) != len(targets):
+            raise ValueError("transaction targets the same item twice")
         try:
-            self.c.transact_write_items(TransactItems=items)
+            self.c.transact_write_items(TransactItems=items, ClientRequestToken=str(uuid.uuid4()))
         except ClientError as e:
             if e.response.get("Error", {}).get("Code") == "TransactionCanceledException":
                 reasons = [r.get("Code", "None") for r in e.response.get("CancellationReasons", [])]
