@@ -48,6 +48,80 @@ class B4Scenarios(unittest.TestCase):
     def test_parallelism_is_at_least_50(self):
         self.assertGreaterEqual(sc.PARALLEL, 50)
 
+    # ---- s10 regression: TransactionConflictException (real DynamoDB, B4 Stage C) -------------
+    def fresh_ctx(self):
+        """New run id = new test users, so these extra runs never collide with the main run."""
+        return sc.Ctx(self.client, self.subs, self.quota, uuid.uuid4().hex[:8], self.ctx.engine)
+
+    def inject_conflicts(self, every=3):
+        """Make every n-th UpdateItem fail exactly like real DynamoDB did in Stage C."""
+        import threading
+        from unittest import mock
+        from botocore.exceptions import ClientError
+
+        real, lock, n = self.client.update_item, threading.Lock(), {"i": 0}
+
+        def flaky(**kw):
+            with lock:
+                n["i"] += 1
+                hit = n["i"] % every == 0
+            if hit:
+                raise ClientError({"Error": {"Code": "TransactionConflictException",
+                                             "Message": "Transaction is ongoing for the item"}}, "UpdateItem")
+            return real(**kw)
+
+        return mock.patch.object(self.client, "update_item", side_effect=flaky), n
+
+    def test_s15_passes_with_injected_transaction_conflicts(self):
+        ctx = self.fresh_ctx()
+        patcher, n = self.inject_conflicts()
+        with patcher:
+            result = sc.s15_same_row_write_storm(ctx)
+        self.assertGreater(n["i"], 3)  # conflicts were actually injected
+        self.assertTrue(result["passed"], f"{result['failures']} {result['metrics']}")
+        self.assertFalse(any("unexpected" in k for k in result["metrics"]["responses"]))
+
+    def test_s10_passes_with_injected_transaction_conflicts(self):
+        ctx = self.fresh_ctx()
+        patcher, _ = self.inject_conflicts()
+        with patcher:
+            result = sc.s10_legacy_and_new_endpoints(ctx)
+        self.assertTrue(result["passed"], f"{result['failures']} {result['metrics']}")
+
+    def test_harness_reports_the_original_bug_instead_of_crashing(self):
+        """Put the pre-fix behaviour back (WriteConflict re-raised as the raw ClientError): the
+        scenario must finish, check integrity and fail with 'unexpected 500s' — not crash."""
+        from unittest import mock
+        from botocore.exceptions import ClientError
+
+        ctx = self.fresh_ctx()
+        orig = ctx.store.update
+
+        def pre_fix_update(*a, **kw):
+            try:
+                return orig(*a, **kw)
+            except sc.store_mod.WriteConflict:
+                raise ClientError({"Error": {"Code": "TransactionConflictException", "Message": "x"}}, "UpdateItem")
+
+        patcher, _ = self.inject_conflicts()
+        with patcher, mock.patch.object(ctx.store, "update", side_effect=pre_fix_update):
+            result = sc.s15_same_row_write_storm(ctx)
+        self.assertFalse(result["passed"])
+        self.assertTrue(any("unexpected 500s" in f and "TransactionConflictException" in f for f in result["failures"]),
+                        result["failures"])
+        self.assertFalse(any(f.startswith("I1") or f.startswith("I2") or f.startswith("I4") for f in result["failures"]),
+                         "integrity must still hold: the rejected writes wrote nothing")
+
+    def test_parallel_records_unexpected_exceptions(self):
+        def boom():
+            raise RuntimeError("programming error")
+
+        res = sc.parallel([boom, lambda: (200, {})])
+        self.assertEqual(res[0], (500, {"error": "unexpected", "exception": "RuntimeError:None"}))
+        chk = sc.Check("probe")
+        chk.responses(res)
+        self.assertFalse(chk.result()["passed"])
+
 
 if sc is not None:
     for _fn in sc.SCENARIOS:
