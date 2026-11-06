@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from . import validation as v
 from .errors import ApiError
 from .months import current_month, effective_month, is_expired, selectable_months
-from .store import ConditionFailed, TxCancelled
+from .store import ConditionFailed, TxCancelled, WriteConflict
 
 MAX_ATTEMPTS = 3
 BACKOFF_BASE_S = 0.025
@@ -111,6 +111,8 @@ class Service:
                 if e.failed(0):
                     raise ApiError(409, "duplicate_subscription", {"route": route}) from None
                 # quota version moved or TransactionConflict: re-read and retry
+            except WriteConflict:
+                raise ApiError(409, "conflict") from None  # outcome unknown: never retry blindly
         raise ApiError(409, "conflict")
 
     # ---- DELETE /subscriptions/{route} -------------------------------------------------
@@ -134,6 +136,8 @@ class Service:
                     if self.store.get_row(email, route) is None:
                         raise ApiError(404, "not_found") from None
                     raise ApiError(409, "conflict") from None
+            except WriteConflict:
+                raise ApiError(409, "conflict") from None  # outcome unknown: never retry blindly
         raise ApiError(409, "conflict")
 
     # ---- PATCH /subscriptions/{route} (never touches the quota, §5.4) -----------------
@@ -180,6 +184,11 @@ class Service:
             if self.store.get_row(email, route) is None:
                 raise ApiError(404, "not_found") from None
             raise ApiError(409, "conflict") from None
+        except WriteConflict:
+            # Another request's transaction is changing this row right now (a create, delete or
+            # route change). The edit was based on the state read before it, so it is not
+            # retried: the client reloads and decides (contract §4.3).
+            raise ApiError(409, "conflict") from None
         return 200, self.view(new, now)
 
     def _change_route(self, email, row, new_route, o, d, month, target, paused, now):
@@ -197,6 +206,8 @@ class Service:
             if e.failed(0):
                 if self.store.get_row(email, row["route"]) is None:
                     raise ApiError(404, "not_found") from None
+            raise ApiError(409, "conflict") from None
+        except WriteConflict:
             raise ApiError(409, "conflict") from None
         return 200, self.view(new_row, now)
 
@@ -222,8 +233,13 @@ class Service:
                     self.store.update(email, route, {"plan_name": plan, "origin": o, "destination": d,
                                                      "target_price": target, "currency": "TWD",
                                                      "updated_at": stamp}, [])
-                except ConditionFailed:
-                    continue  # deleted meanwhile: re-read decides
+                except (ConditionFailed, WriteConflict) as e:
+                    if isinstance(e, WriteConflict) and not e.retryable:
+                        raise ApiError(409, "conflict") from None
+                    # Deleted meanwhile, or a transaction is changing the row right now
+                    # (TransactionConflictException, B4 Stage C s10): nothing was written, so
+                    # re-read and retry within the bounded attempts (jittered backoff above).
+                    continue
                 return 200, {"route": route, "plan_name": plan, "target_price": target, "currency": "TWD",
                              "updated_at": stamp}
             if len(rows) >= self.cfg.max_subscriptions:
@@ -237,4 +253,6 @@ class Service:
                              "updated_at": stamp}
             except TxCancelled:
                 continue  # created meanwhile (→ update next time) or version moved
+            except WriteConflict:
+                raise ApiError(409, "conflict") from None  # outcome unknown: never retry blindly
         raise ApiError(409, "conflict")

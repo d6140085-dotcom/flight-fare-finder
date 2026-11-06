@@ -953,6 +953,124 @@ class RetryHandlingTests(LocalDynamoTestCase):
         self.assertEqual(self.raw(), {})
 
 
+class TransactionConflictRegressionTests(LocalDynamoTestCase):
+    """Regression for B4 Stage C, scenario s10 (real DynamoDB, 2026-11-06): a single-item
+    UpdateItem on a row that an in-flight TransactWriteItems is changing fails with
+    TransactionConflictException ("Transaction is ongoing for the item"). Emulators never raise
+    it, so these tests inject the exact error DynamoDB returned, as botocore raises it."""
+
+    @staticmethod
+    def dynamo_error(code, op="UpdateItem", msg="Transaction is ongoing for the item"):
+        from botocore.exceptions import ClientError
+        return ClientError({"Error": {"Code": code, "Message": msg},
+                            "ResponseMetadata": {"HTTPStatusCode": 400}}, op)
+
+    def fail_first_updates(self, n, code="TransactionConflictException"):
+        """Make the first n update_item calls fail like DynamoDB did, then behave normally."""
+        real, calls = self.client.update_item, {"n": 0}
+
+        def side_effect(**kw):
+            calls["n"] += 1
+            if calls["n"] <= n:
+                raise self.dynamo_error(code)
+            return real(**kw)
+
+        return mock.patch.object(self.client, "update_item", side_effect=side_effect), calls
+
+    def legacy(self, target=7000):
+        return self.call("POST /subscribe", {"plan_name": "tokyo", "target_price": target})
+
+    def test_store_maps_the_error_to_write_conflict(self):
+        self.create("LON")
+        patcher, _ = self.fail_first_updates(1)
+        with patcher, self.assertRaises(store_mod.WriteConflict) as e:
+            self.store.update(USER, "TPE-LON", {"target_price": 1}, [])
+        self.assertEqual(e.exception.code, "TransactionConflictException")
+        self.assertTrue(e.exception.retryable)
+
+    def test_legacy_subscribe_retries_and_succeeds(self):
+        self.legacy(9000)  # creates TPE-TYO (rolling); the next call takes the update path
+        patcher, calls = self.fail_first_updates(1)
+        with patcher:
+            status, body = self.legacy(7000)
+        self.assertEqual((status, body["target_price"]), (200, 7000))
+        self.assertEqual(calls["n"], 2)  # one conflict, one successful retry
+        self.assertEqual(len(self.sleeps), 1)  # one bounded backoff before the retry
+        self.assertTrue(0 <= self.sleeps[0] <= 0.2)
+        self.assertEqual(self.raw()["TPE-TYO"]["target_price"], 7000)
+
+    def test_legacy_subscribe_gives_up_after_three_attempts_with_409(self):
+        self.legacy(9000)
+        before = self.raw()["TPE-TYO"]
+        patcher, calls = self.fail_first_updates(99)
+        with patcher:
+            status, body = self.legacy(7000)
+        self.assertEqual((status, body["error"]), (409, "conflict"))  # not 500
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(len(self.sleeps), 2)
+        self.assertEqual(self.raw()["TPE-TYO"], before)  # nothing written
+
+    def test_patch_returns_409_without_retrying(self):
+        _, row = self.create("LON", target=28000)
+        patcher, calls = self.fail_first_updates(99)
+        for body in ({"target_price": 1}, {"departure_month": "2027-05"}, {"alerts_paused": True},
+                     {"alerts_paused": False, "target_price": 2}):
+            with patcher:
+                status, out = self.patch("TPE-LON", body)
+            self.assertEqual((status, out["error"]), (409, "conflict"), body)
+        self.assertEqual(calls["n"], 4)  # exactly one attempt per request: no blind retry
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(self.raw()["TPE-LON"]["updated_at"], row["updated_at"])
+
+    def test_conditional_check_failed_handling_is_unchanged(self):
+        self.create("LON")
+        patcher, _ = self.fail_first_updates(1, code="ConditionalCheckFailedException")
+        with patcher:
+            self.assertEqual(self.patch("TPE-LON", {"target_price": 1})[1]["error"], "conflict")
+        self.assertEqual(self.patch("TPE-PAR", {"target_price": 1})[0], 404)
+
+    def test_transaction_in_progress_is_never_retried(self):
+        """Our own re-sent transaction may still commit: report 409, don't create a second one."""
+        err = self.dynamo_error("TransactionInProgressException", op="TransactWriteItems", msg="in progress")
+        with mock.patch.object(self.client, "transact_write_items", side_effect=err) as m:
+            status, body = self.create("LON")
+        self.assertEqual((status, body["error"], m.call_count), (409, "conflict", 1))
+        with mock.patch.object(self.client, "transact_write_items", side_effect=err) as m:
+            status, body = self.legacy(7000)
+        self.assertEqual((status, body["error"], m.call_count), (409, "conflict", 1))
+
+    def test_transaction_conflict_raised_by_transact_is_retried(self):
+        """Defensive: if TransactWriteItems itself ever raises TransactionConflictException, it
+        is treated like a TransactionConflict cancellation (re-read and retry)."""
+        real, n = self.client.transact_write_items, {"n": 0}
+
+        def flaky(**kw):
+            n["n"] += 1
+            if n["n"] == 1:
+                raise self.dynamo_error("TransactionConflictException", op="TransactWriteItems")
+            return real(**kw)
+
+        with mock.patch.object(self.client, "transact_write_items", side_effect=flaky):
+            self.assertEqual(self.create("LON")[0], 201)
+        self.assertEqual(n["n"], 2)
+        self.assert_invariants()
+
+    def test_unexpected_errors_stay_500_and_are_logged(self):
+        self.create("LON")
+        self.quiet.stop()  # capture the handler's log line for this test
+        try:
+            for code in ("ValidationException", "AccessDeniedException"):
+                patcher, _ = self.fail_first_updates(1, code=code)
+                with patcher, mock.patch("builtins.print") as log:
+                    status, body = self.patch("TPE-LON", {"target_price": 1})
+                self.assertEqual((status, body["error"]), (500, "internal_error"), code)
+                line = json.loads(log.call_args[0][0])
+                self.assertEqual((line["exception"], line["aws_error"]), ("ClientError", code))
+                self.assertNotIn("@", log.call_args[0][0])  # no email in logs
+        finally:
+            self.quiet.start()
+
+
 # =============================================================================================
 # Concurrency: ≥ 50 simultaneous requests per scenario
 # =============================================================================================

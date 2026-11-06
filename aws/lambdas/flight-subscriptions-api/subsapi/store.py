@@ -32,7 +32,32 @@ class TxCancelled(Exception):
 
 
 class ConditionFailed(Exception):
-    pass
+    """A single-item write's condition was false (row missing or changed). Nothing written."""
+
+
+class WriteConflict(Exception):
+    """DynamoDB refused a write because of a concurrent transaction; nothing was written by
+    this request, and the caller decides whether a fresh read-and-retry is safe.
+
+    ``code`` is DynamoDB's error code:
+      * ``TransactionConflictException`` — a single-item write hit an item that an in-flight
+        TransactWriteItems is changing (seen on real DynamoDB in B4 Stage C, scenario s10;
+        the emulators never produce it). Safe to re-read and retry.
+      * ``TransactionInProgressException`` — the SDK re-sent our own TransactWriteItems while the
+        first attempt is still running; its outcome is unknown, so callers must not retry it.
+    """
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+    @property
+    def retryable(self):
+        return self.code == "TransactionConflictException"
+
+
+def _error_code(e):
+    return e.response.get("Error", {}).get("Code")
 
 
 def _plain(value):
@@ -125,10 +150,15 @@ class Store:
         try:
             self.c.transact_write_items(TransactItems=items, ClientRequestToken=str(uuid.uuid4()))
         except ClientError as e:
-            if e.response.get("Error", {}).get("Code") == "TransactionCanceledException":
+            code = _error_code(e)
+            if code == "TransactionCanceledException":
                 reasons = [r.get("Code", "None") for r in e.response.get("CancellationReasons", [])]
                 raise TxCancelled(reasons) from None
-            raise
+            if code == "TransactionConflictException":  # defensive: normally a cancellation reason
+                raise TxCancelled(["TransactionConflict"]) from None
+            if code == "TransactionInProgressException":
+                raise WriteConflict(code) from None
+            raise  # anything else is unexpected: surfaces as a 500 with its code logged
 
     def create(self, email, row, quota, new_count, now):
         self._transact([
@@ -181,7 +211,10 @@ class Store:
                 ExpressionAttributeNames=names, ExpressionAttributeValues=values, ReturnValues="ALL_NEW",
             )
         except ClientError as e:
-            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            code = _error_code(e)
+            if code == "ConditionalCheckFailedException":
                 raise ConditionFailed() from None
-            raise
+            if code == "TransactionConflictException":
+                raise WriteConflict(code) from None
+            raise  # anything else is unexpected: surfaces as a 500 with its code logged
         return from_item(r["Attributes"])
