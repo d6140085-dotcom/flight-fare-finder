@@ -92,6 +92,10 @@ the function to force a cold start (the parameter is cached per container).
   `aws/scripts/plan_m14_subscriptions_api.sh` (dry run by default, never executes).
   Integration tests: `pip install -r aws/requirements-test.txt`, then the usual unittest command
   (local server), or `aws/scripts/test_dynamodb_local.sh` (DynamoDB Local in Docker).
+- `aws/integration/`: B4 concurrency validation — shared scenarios (`m14_scenarios.py`), the
+  temporary runner Lambda, its packager and the isolated test-stack template
+  (`build_test_env.py`). Plan: `docs/m1.4-b4-dynamodb-validation-plan.md`. Nothing here is
+  deployed without owner approval.
 - `aws/iam/`: least-privilege IAM **design** documents for GitHub Actions + OIDC deployment and
   the subscriptions API role. Not deployed.
 - Plan: `docs/m1.4-plan.md`; decisions: `docs/adr/0001-m1-4-dynamic-routes.md`;
