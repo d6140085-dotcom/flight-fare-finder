@@ -1,0 +1,12 @@
+{
+  "_comment": "Synthetic v1 /v1/prices/cheap response for offline tests (documented field names; not real fares). Requested TPE-TYO, depart_date=2026-12, currency=twd.",
+  "success": true,
+  "currency": "twd",
+  "data": {
+    "TYO": {
+      "0": {"price": 8300, "airline": "BR", "flight_number": 192, "departure_at": "2026-12-11T07:30:00+08:00", "return_at": "2026-12-18T19:00:00+09:00", "expires_at": "2026-11-08T00:00:00Z"},
+      "1": {"price": 6900, "airline": "IT", "flight_number": 200, "departure_at": "2026-12-04T07:30:00+08:00", "return_at": "2026-12-08T19:00:00+09:00", "expires_at": "2026-11-01T00:00:00Z"},
+      "2": {"price": 8900, "airline": "CI", "flight_number": 100, "departure_at": "2026-12-06T07:30:00+08:00", "return_at": "2026-12-12T19:00:00+09:00", "expires_at": "2026-11-09T00:00:00Z"}
+    }
+  }
+}

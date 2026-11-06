@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { demoFareChecks, fareCheckKey, fareDisplay } from "./fare-status";
+import apiViews from "../../../aws/tests/fixtures/fare_check_api_view.json";
+import {
+  demoFareChecks,
+  fareCheckKey,
+  fareDisplay,
+  hasItinerary,
+  type FareCheck,
+} from "./fare-status";
 import { demoSubscriptions, type RouteSubscription } from "./subscriptions";
 
 const NOW = new Date("2026-11-05T03:00:00Z");
@@ -60,5 +67,33 @@ describe("fare status display", () => {
       "TPE-SYD#2026-12",
       "TPE-TYO#2026-12",
     ]);
+  });
+});
+
+describe("fare_check from the Phase 2A fare check", () => {
+  // Same fixture as aws/tests/test_m14_fare_check.py, so the Python output and this type agree.
+  const ok = apiViews.ok as FareCheck;
+  const noData = apiViews.no_data as FareCheck;
+  const error = apiViews.error as FareCheck;
+
+  it("renders the API shape for every kind", () => {
+    const sub = { ...base, route: "TPE-TYO", destination: "TYO", departure_month: "2026-12" };
+    expect(fareDisplay(sub, NOW, ok).text).toBe("最近查到 2026 年 12 月 出發最低 NT$8,062。");
+    expect(fareDisplay(sub, NOW, noData).kind).toBe("no_data");
+    expect(fareDisplay(sub, NOW, error).kind).toBe("error");
+  });
+
+  it("keeps the itinerary needed for future search links", () => {
+    expect(ok).toMatchObject({
+      currency: "TWD",
+      depart_date: "2026-12-11",
+      return_date: "2026-12-18",
+      origin_airport: "TSA",
+      destination_airport: "HND",
+    });
+    expect(hasItinerary(ok)).toBe(true);
+    expect(hasItinerary(noData)).toBe(false);
+    expect(hasItinerary(null)).toBe(false);
+    expect(hasItinerary({ kind: "ok", cheapest_twd: 9820, checked_at: at })).toBe(false);
   });
 });

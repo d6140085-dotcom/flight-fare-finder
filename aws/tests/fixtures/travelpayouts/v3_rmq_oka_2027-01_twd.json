@@ -1,0 +1,2 @@
+{"_comment": "Synthetic v3 response for RMQ-OKA 2027-01 (offline tests).", "success": true, "currency": "twd", "data": [
+ {"origin": "RMQ", "destination": "OKA", "origin_airport": "RMQ", "destination_airport": "OKA", "price": 5890, "airline": "IT", "departure_at": "2027-01-09T10:00:00+08:00", "return_at": "2027-01-13T15:00:00+09:00", "transfers": 0, "return_transfers": 0}]}

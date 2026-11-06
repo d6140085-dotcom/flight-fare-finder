@@ -1,0 +1,11 @@
+[
+  {"email": "m1-tokyo@example.com", "route": "TPE-TYO", "plan_name": "tokyo", "origin": "TPE", "destination": "TYO", "target_price": 9000, "currency": "TWD"},
+  {"email": "m1-seoul@example.com", "route": "TPE-SEL", "plan_name": "seoul", "origin": "TPE", "destination": "SEL", "target_price": 7000, "currency": "TWD"},
+  {"email": "fixed-dec@example.com", "route": "TPE-TYO", "origin": "TPE", "destination": "TYO", "departure_month": "2026-12", "target_price": 8100, "currency": "TWD"},
+  {"email": "fixed-feb@example.com", "route": "TPE-TYO", "origin": "TPE", "destination": "TYO", "departure_month": "2027-02", "target_price": 20000, "currency": "TWD"},
+  {"email": "paused@example.com", "route": "TPE-TYO", "origin": "TPE", "destination": "TYO", "departure_month": "2026-12", "alerts_paused": true, "target_price": 20000, "currency": "TWD"},
+  {"email": "expired@example.com", "route": "TPE-TYO", "origin": "TPE", "destination": "TYO", "departure_month": "2026-10", "target_price": 20000, "currency": "TWD"},
+  {"email": "khh@example.com", "route": "KHH-OKA", "origin": "KHH", "destination": "OKA", "departure_month": "2027-01", "target_price": 6000, "currency": "TWD"},
+  {"email": "rmq@example.com", "route": "RMQ-OKA", "origin": "RMQ", "destination": "OKA", "departure_month": "2027-01", "target_price": 6000, "currency": "TWD"},
+  {"email": "low-target@example.com", "route": "TPE-TYO", "origin": "TPE", "destination": "TYO", "departure_month": "2026-12", "target_price": 5000, "currency": "TWD"}
+]

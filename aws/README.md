@@ -101,7 +101,85 @@ the function to force a cold start (the parameter is cached per container).
   temporary runner Lambda, its packager and the isolated test-stack template
   (`build_test_env.py`). Plan: `docs/m1.4-b4-dynamodb-validation-plan.md`. Nothing here is
   deployed without owner approval.
+- `aws/lambdas/flight-fare-check/`: Phase 2A dynamic fare check (**not deployed**; the M1
+  `flight-parser*/index.py` files are unchanged and still what runs). See "M1.4 Phase 2A fare
+  check" below.
 - `aws/iam/`: least-privilege IAM **design** documents for GitHub Actions + OIDC deployment and
   the subscriptions API role. Not deployed.
 - Plan: `docs/m1.4-plan.md`; decisions: `docs/adr/0001-m1-4-dynamic-routes.md`;
   deployment design: `docs/deploy/github-actions-oidc.md`.
+
+## M1.4 Phase 2A fare check (not deployed)
+
+One package, two handlers, one deterministic ZIP (`python3 aws/scripts/package_fare_check.py`):
+
+| Handler | Replaces (after approval) | Does |
+|---|---|---|
+| `wrapper.handler` | `flight-parser-wrapper` | Scans `subscriptions` **without `email`** (route, origin, destination, departure_month, alerts_paused), drops paused/expired/unknown rows, and invokes the parser once per distinct `(origin, destination, effective_month)`; `flight-routes.json` is no longer read |
+| `parser.handler` | `flight-parser` | One work item → Travelpayouts (v1 or v3) → validated cheapest round-trip TWD fare → rows of that route **and month**, active, target ≥ fare → SQS (M1 message shape, key for key), or log only in DRY_RUN |
+
+Package layout (`farecheck/`): `workitems.py` (rows → work items), `months.py` (same rules as
+the API; parity-tested), `travelpayouts.py` (v1/v3 adapters and offer validation), `matching.py`,
+`status.py` (fare-check records, API contract §3.4), `compat.py` (v1/v3 comparison for B5),
+`effects.py` (the only place with side effects), `runner.py`.
+
+Settings (environment variables):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FARE_API` | `v1` | `v1` = M1's `/v1/prices/cheap` query; `v3` = `/aviasales/v3/prices_for_dates` with `one_way=false`, `currency=twd`, `sorting=price`, `limit=V3_LIMIT`, no `market` |
+| `DRY_RUN` | off | Any value except `0/false/no/off` turns it on. Parser: no SQS client is ever created; would-be messages are logged with a subscriber hash. Wrapper: every parser payload carries `"dry_run": true`, and the parser honours a payload flag that turns DRY_RUN **on** (never off) |
+| `FETCH_USD` | on | M1's best-effort USD lookup for the 約 US$ line; `0` halves Travelpayouts calls |
+| `V3_LIMIT` | `30` | Offers per v3 request (documented default 30, max 1000) |
+| `MAX_WORK_ITEMS` | `500` | Safety cap per run; extra items are logged and wait for the next run |
+| `FARE_QUEUE_URL`, `TP_PARAM`, `PARSER_FUNCTION` | as M1 | Unchanged |
+
+Offer validation (both APIs): price is a positive number ≤ 2,000,000; currency (response and
+item, when present) equals the requested one; `return_at` is present (round trip only); both
+dates parse; departure falls in the requested month and hasn't happened yet; return is on or
+after departure and within 366 days; v1 `expires_at` is in the future; returned `origin` /
+`destination` codes match the request; `origin_airport` / `destination_airport` (v3) belong to
+the requested city's airports in `airports.json` (e.g. `TPE` → `TPE` or `TSA`). Rejections are
+counted per reason and logged; a response with no valid offer is `no_data`, never an alert.
+
+Deliberate differences from M1 (owner review): (1) rolling rows resolve to next month in
+**Asia/Taipei** (M1 used UTC; they differ only 00:00–08:00 Taipei on the 1st of a month);
+(2) the v1 path now applies the same offer validation, so a one-way, wrong-month, expired or
+wrong-currency offer can no longer trigger an alert.
+
+### DRY_RUN instructions
+
+Offline (no AWS, no network) — wrapper and parser in-process on fixtures:
+
+```
+python3 aws/tools/farecheck_dry_run.py --api v1     # or --api v3
+python3 aws/tools/farecheck_dry_run.py --api v3 --now 2026-11-06T13:00:00Z \
+    --subscriptions my-rows.json --responses my-recorded-responses/
+```
+
+Fixtures live in `aws/tests/fixtures/travelpayouts/` (`<api>_<origin>_<dest>_<month>_<cur>.json`,
+synthetic, documented field names). A missing response file behaves like an unreachable API.
+Tests: `python3 -m unittest aws/tests/test_m14_fare_check.py`.
+
+Live DRY_RUN against Travelpayouts (B5 evidence) needs **separate approval**. Proposed shape:
+a temporary isolated stack with two DRY_RUN-only functions from this ZIP, a role with only
+`dynamodb:Scan` on `subscriptions` (read), `ssm:GetParameter` on `/flight/travelpayouts` and
+`lambda:InvokeFunction` on its own parser — no SQS, no write, no notification access — run for
+several schedules with `FARE_API=v1` and `v3`, then compared with `farecheck/compat.py`.
+
+### AWS resources needed later (each needs approval; none created)
+
+1. **Packaged deployment** of `flight-parser` and `flight-parser-wrapper` (handlers
+   `parser.handler` / `wrapper.handler`, code from this ZIP instead of inline `ZipFile`), i.e. a
+   template change to `flight-m1-fetch-prices` and an artifact location (planned S3 artifacts
+   bucket, ADR D10).
+2. **Environment variables** on those functions (`FARE_API=v1`, `DRY_RUN=1` first).
+3. **Parser reserved concurrency ≈ 5** (Travelpayouts per-minute limits).
+4. IAM: none for the runtime — `flight-lambda-role` already allows `dynamodb:Scan` on
+   `subscriptions`, `sqs:SendMessage` on `flight-fare-queue` and `lambda:InvokeFunction` on
+   `flight-parser` (checked read-only 2026-11-06). The shared role is broader than needed
+   (it can also write both tables); a dedicated read-only role is recommended for the live
+   DRY_RUN stack above and for a later least-privilege split.
+5. Optional, later: the `fare_check` table (key `"{origin}-{destination}#{month}"`, TTL on
+   `expires_at`, records from `farecheck/status.py`) with `PutItem` for the parser and
+   `BatchGetItem` for the API; the `route-index` GSI at ~1,000 subscriptions.
