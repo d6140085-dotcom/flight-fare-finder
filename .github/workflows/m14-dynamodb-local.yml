@@ -1,0 +1,33 @@
+# M1.4 B4: run the subscriptions API tests and the concurrency scenarios against Amazon
+# DynamoDB Local (a Docker container on the GitHub runner). No AWS account, no AWS credentials,
+# no network access to AWS: fake keys and a localhost endpoint only.
+# Manual only (Actions tab -> "M1.4 DynamoDB Local tests" -> Run workflow); never runs on push/PR.
+name: M1.4 DynamoDB Local tests
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  dynamodb-local:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:3.3.2
+        ports: ["8000:8000"]
+    env:
+      DDB_ENDPOINT: http://127.0.0.1:8000
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
+      AWS_DEFAULT_REGION: ap-southeast-2
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r aws/requirements-test.txt
+      - name: Wait for DynamoDB Local
+        run: for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8000 && break; sleep 1; done
+      - name: API tests + B4 scenarios on DynamoDB Local
+        run: python -m unittest -v aws/tests/test_m14_subscriptions_api.py aws/tests/test_m14_ddb_scenarios.py

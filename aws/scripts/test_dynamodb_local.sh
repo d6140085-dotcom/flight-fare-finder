@@ -3,7 +3,7 @@
 # Amazon DynamoDB Local in Docker. Local only: no AWS account, fake credentials, localhost.
 # Requires Docker and: pip install -r aws/requirements-test.txt
 set -euo pipefail
-IMAGE="${DYNAMODB_LOCAL_IMAGE:-amazon/dynamodb-local:2.6.0}"
+IMAGE="${DYNAMODB_LOCAL_IMAGE:-amazon/dynamodb-local:3.3.2}"
 PORT="${DYNAMODB_LOCAL_PORT:-8000}"
 cd "$(dirname "$0")/../.."
 name="flight-ddb-local-$$"
@@ -14,4 +14,4 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 DDB_ENDPOINT="http://127.0.0.1:${PORT}" AWS_ACCESS_KEY_ID=testing AWS_SECRET_ACCESS_KEY=testing \
-  AWS_DEFAULT_REGION=ap-southeast-2 python3 -m unittest -v aws/tests/test_m14_subscriptions_api.py
+  AWS_DEFAULT_REGION=ap-southeast-2 python3 -m unittest -v aws/tests/test_m14_subscriptions_api.py aws/tests/test_m14_ddb_scenarios.py
