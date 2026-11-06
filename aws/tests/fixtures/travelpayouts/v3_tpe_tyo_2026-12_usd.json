@@ -1,0 +1,2 @@
+{"_comment": "Synthetic v3 USD response for the optional 約 US$ line (offline tests).", "success": true, "currency": "usd", "data": [
+ {"origin": "TPE", "destination": "TYO", "origin_airport": "TSA", "destination_airport": "HND", "price": 262, "airline": "BR", "departure_at": "2026-12-11T07:30:00+08:00", "return_at": "2026-12-18T19:00:00+09:00"}]}

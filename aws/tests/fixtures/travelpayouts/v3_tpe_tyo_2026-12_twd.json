@@ -1,0 +1,16 @@
+{
+  "_comment": "Synthetic v3 /aviasales/v3/prices_for_dates response for offline tests (documented field names; not real fares). Requested TPE-TYO, departure_at=2026-12, one_way=false, currency=twd.",
+  "success": true,
+  "currency": "twd",
+  "data": [
+    {"origin": "TPE", "destination": "TYO", "origin_airport": "TSA", "destination_airport": "HND", "price": 8062, "airline": "BR", "flight_number": "192", "departure_at": "2026-12-11T07:30:00+08:00", "return_at": "2026-12-18T19:00:00+09:00", "transfers": 0, "return_transfers": 0, "duration": 410, "duration_to": 190, "duration_back": 220, "link": "/search/TSA1112HND18121?t=example"},
+    {"origin": "TPE", "destination": "TYO", "origin_airport": "TPE", "destination_airport": "NRT", "price": 8540, "airline": "JX", "flight_number": "800", "departure_at": "2026-12-05T09:10:00+08:00", "return_at": "2026-12-09T14:00:00+09:00", "transfers": 0, "return_transfers": 0, "link": "/search/TPE0512NRT09121?t=example"},
+    {"origin": "TPE", "destination": "TYO", "origin_airport": "TPE", "destination_airport": "NRT", "price": 3100, "airline": "IT", "departure_at": "2026-12-03T06:00:00+08:00", "transfers": 0},
+    {"origin": "TPE", "destination": "TYO", "origin_airport": "TPE", "destination_airport": "NRT", "price": 5200, "airline": "MM", "departure_at": "2027-01-02T06:00:00+08:00", "return_at": "2027-01-08T10:00:00+09:00"},
+    {"origin": "KHH", "destination": "TYO", "origin_airport": "KHH", "destination_airport": "NRT", "price": 4100, "airline": "CI", "departure_at": "2026-12-12T06:00:00+08:00", "return_at": "2026-12-15T10:00:00+09:00"},
+    {"origin": "TPE", "destination": "TYO", "origin_airport": "TPE", "destination_airport": "NRT", "price": 260, "currency": "usd", "airline": "BR", "departure_at": "2026-12-13T06:00:00+08:00", "return_at": "2026-12-16T10:00:00+09:00"},
+    {"origin": "TPE", "destination": "TYO", "origin_airport": "TPE", "destination_airport": "NRT", "price": 6100, "airline": "BR", "departure_at": "2026-12-20T06:00:00+08:00", "return_at": "2026-12-14T10:00:00+09:00"},
+    {"origin": "TPE", "destination": "TYO", "origin_airport": "TPE", "destination_airport": "KIX", "price": 4999, "airline": "MM", "departure_at": "2026-12-21T06:00:00+08:00", "return_at": "2026-12-24T10:00:00+09:00"},
+    {"origin": "TPE", "destination": "TYO", "price": "abc", "airline": "BR", "departure_at": "2026-12-21T06:00:00+08:00", "return_at": "2026-12-24T10:00:00+09:00"}
+  ]
+}
