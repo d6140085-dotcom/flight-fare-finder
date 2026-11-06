@@ -161,6 +161,16 @@ the new routes at the new handler together, so no quota-unaware writer runs alon
 Phase 1B (API stack) and Phase 2 (fare check) may ship as separate change sets only if the new
 routes stay unattached/inaccessible in between; otherwise they ship together.
 
+### D15. Multi-platform search links are presentation, separate from fare detection
+(2026-11-06, proposed) Fares still come only from the Travelpayouts Data API. Search links to
+Skyscanner Taiwan, Trip.com Taiwan, Aviasales and (fallback) Google Flights are built by a pure
+module from route and dates at render time, in the notification email (Phase 2B) and in the
+browser (Phase 3), driven by one configuration file. They are never computed by the wrapper or
+parser, never stored, and never added to the SQS message, so link formats, platform order and
+future affiliate parameters change without touching fare detection, deduplication or any table
+schema. A detected fare is always presented as a reference price; no link may become one-way.
+Details: [Multi-Platform Flight Search Links](../m1.4-multi-platform-search-links.md).
+
 ## Alternatives considered
 
 - **New table / composite key with a subscription ID** (allow several targets per route):
@@ -178,6 +188,10 @@ routes stay unattached/inaccessible in between; otherwise they ship together.
   region). Autocomplete deferred until the allowlist proves out.
 - **Every airport in a metro area as separate entries**: more precise, but duplicates fares and
   confuses users (Tokyo vs Narita vs Haneda). Rejected in favour of city codes where they exist.
+- **Store search URLs in the SQS message or a table**: rejected (D15); formats change and would
+  need data migrations or parser deployments.
+- **Skyscanner referral endpoint without a partner ID**: rejected for v1; its redirect attaches
+  tracking parameters not issued to this project (search links spec §3.2).
 - **Keep inline CloudFormation code**: no new infrastructure, but the notification code is
   already at the limit and reading code back through the AWS connector is unreliable for
   non-ASCII text. Rejected for the long term.

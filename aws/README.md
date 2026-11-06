@@ -63,6 +63,11 @@ env vars; an unknown code is shown as the bare code). The 「立即訂購」 lin
 Aviasales requires). The notification code sits at the 4,096-byte inline limit: add display names
 to `names.json`, not to the code.
 
+Planned (Phase 2B, not implemented): the single 「立即訂購」 link becomes a reference-fare line
+plus search links to Skyscanner Taiwan, Trip.com Taiwan, Aviasales and Google Flights, with a
+price disclaimer — see [Multi-Platform Flight Search Links](../docs/m1.4-multi-platform-search-links.md).
+The message format the Lambda reads does not change.
+
 ### Affiliate marker (not enabled)
 
 To earn commission, add your Travelpayouts partner ID ("marker", not a secret) as
