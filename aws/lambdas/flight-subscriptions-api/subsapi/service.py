@@ -232,7 +232,12 @@ class Service:
                     # Upsert semantics of M1.1: keeps created_at, pause state and departure_month.
                     self.store.update(email, route, {"plan_name": plan, "origin": o, "destination": d,
                                                      "target_price": target, "currency": "TWD",
-                                                     "updated_at": stamp}, [])
+                                                     "updated_at": stamp}, [],
+                                      # Only on top of the state just read: a concurrent edit
+                                      # makes this a ConditionFailed and the loop re-reads, so
+                                      # updated_at never moves backwards and nothing unseen is
+                                      # overwritten (a blind write could reuse an old token).
+                                      expected_updated_at=existing.get("updated_at"))
                 except (ConditionFailed, WriteConflict) as e:
                     if isinstance(e, WriteConflict) and not e.retryable:
                         raise ApiError(409, "conflict") from None

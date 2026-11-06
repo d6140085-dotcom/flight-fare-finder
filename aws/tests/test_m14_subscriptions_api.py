@@ -1071,6 +1071,32 @@ class TransactionConflictRegressionTests(LocalDynamoTestCase):
             self.quiet.start()
 
 
+class LegacyStaleUpdateTests(LocalDynamoTestCase):
+    """The legacy upsert is conditioned on the updated_at it read, so a retry can never write
+    a stale updated_at over a newer one or overwrite a change it hasn't seen."""
+
+    def test_legacy_update_rereads_after_a_concurrent_change(self):
+        self.call("POST /subscribe", {"plan_name": "tokyo", "target_price": 9000})
+        real_list = self.store.list_rows
+        state = {"done": False}
+
+        def list_then_concurrent_patch(email):
+            rows = real_list(email)
+            if not state["done"]:  # between our read and our write, someone pauses the row
+                state["done"] = True
+                self.svc.patch(USER, "TPE-TYO", {"alerts_paused": True, "target_price": 8888})
+            return rows
+
+        with mock.patch.object(self.store, "list_rows", side_effect=list_then_concurrent_patch):
+            status, body = self.call("POST /subscribe", {"plan_name": "tokyo", "target_price": 7000})
+        self.assertEqual(status, 200)
+        row = self.raw()["TPE-TYO"]
+        self.assertEqual(row["target_price"], 7000)  # the later legacy request's own value
+        self.assertIs(row["alerts_paused"], True)  # the concurrent pause is kept
+        self.assertEqual(len(self.sleeps), 1)  # it re-read once instead of writing blindly
+        self.assertEqual(row["updated_at"], body["updated_at"])
+
+
 # =============================================================================================
 # Concurrency: ≥ 50 simultaneous requests per scenario
 # =============================================================================================
