@@ -106,5 +106,10 @@ def handler(event, context):
             out["details"] = e.details
         return _resp(e.status, out)
     except Exception as e:  # never leak internals; nothing is partially written (transactions)
-        print(json.dumps({"route": event.get("routeKey"), "status": 500, "exception": type(e).__name__}))
+        # Unexpected failures (programming errors, AccessDenied, ValidationException, throttling
+        # after the SDK's retries) stay 500s and are logged with their type and AWS error code,
+        # never hidden as 409s and never with message text (which can echo request data).
+        code = getattr(e, "response", {}).get("Error", {}).get("Code") if hasattr(e, "response") else None
+        print(json.dumps({"route": event.get("routeKey"), "status": 500, "exception": type(e).__name__,
+                          "aws_error": code}))
         return _resp(500, {"error": "internal_error", "message": message("internal_error", svc.cfg, svc.clock())})

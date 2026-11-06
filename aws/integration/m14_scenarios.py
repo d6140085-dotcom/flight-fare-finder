@@ -122,13 +122,29 @@ class Check:
             self.that(len(rows) == expect_rows, f"{email}: expected {expect_rows} rows, found {len(rows)}")
         return rows, q
 
+    def responses(self, res, allowed=None):
+        """Record the response tally; fail on any unexpected 500, and on any status outside
+        ``allowed`` when given."""
+        self.metrics["responses"] = tally(res)
+        unexpected = [b.get("exception") for s, b in res if s >= 500]
+        self.that(not unexpected, f"unexpected 500s: {sorted(set(unexpected))} x{len(unexpected)}")
+        if allowed is not None:
+            bad = sorted({s for s, _ in res if s not in allowed})
+            self.that(not bad, f"statuses outside {sorted(allowed)}: {bad}")
+
     def result(self):
         return {"scenario": self.name, "passed": not self.failures, "failures": self.failures[:20],
                 "metrics": self.metrics}
 
 
 def parallel(calls):
-    """Release every call at the same instant; return results in order."""
+    """Release every call at the same instant; return results in order.
+
+    ApiError becomes its HTTP status and code (expected outcomes such as 409). Any other
+    exception is what the handler would turn into an HTTP 500: it is recorded as
+    (500, {"error": "unexpected", "exception": "<type>:<AWS code>"}) instead of crashing the
+    scenario, so the scenario still checks database integrity and reports the failure.
+    """
     barrier = threading.Barrier(len(calls))
 
     def go(fn):
@@ -137,6 +153,9 @@ def parallel(calls):
             return fn()
         except ApiError as e:
             return e.status, {"error": e.code}
+        except Exception as e:  # noqa: BLE001 - recorded, then failed by Check.responses
+            code = e.response.get("Error", {}).get("Code") if hasattr(e, "response") else None
+            return 500, {"error": "unexpected", "exception": f"{type(e).__name__}:{code}"}
 
     with ThreadPoolExecutor(max_workers=len(calls)) as pool:
         return list(pool.map(go, calls))
@@ -146,6 +165,8 @@ def tally(results):
     out = {}
     for status, body in results:
         k = str(status) if status < 400 else f"{status} {body['error']}"
+        if body and body.get("exception"):
+            k += f" ({body['exception']})"
         out[k] = out.get(k, 0) + 1
     return out
 
@@ -187,7 +208,7 @@ def s01_limit_counts_paused_and_expired(ctx):
     statuses = {svc.view(r, NOW)["status"] for r in ctx.rows(u).values()}
     chk.that(statuses == {"active", "paused", "expired"}, f"seed statuses {statuses}")
     res = parallel([lambda d=d: svc.create(u, create_body(d)) for d in DESTS[10:10 + PARALLEL]])
-    chk.metrics["responses"] = tally(res)
+    chk.responses(res)
     chk.that(all(s == 409 for s, _ in res), "a create succeeded at 10 records")
     chk.invariants(ctx, u, expect_rows=10)
     return chk.result()
@@ -198,7 +219,7 @@ def s02_concurrent_creates_from_empty(ctx):
     chk, u, svc = Check("s02_concurrent_creates_from_empty"), ctx.user("s02"), ctx.service()
     res = parallel([lambda d=d: svc.create(u, create_body(d)) for d in DESTS[:PARALLEL]])
     created = [b["route"] for s, b in res if s == 201]
-    chk.metrics["responses"] = tally(res)
+    chk.responses(res)
     chk.that(1 <= len(created) <= 10, f"{len(created)} creates succeeded")
     chk.that(all(s in (201, 409) for s, _ in res), "unexpected status")
     rows, q = chk.invariants(ctx, u)
@@ -213,7 +234,7 @@ def s03_concurrent_creates_at_nine(ctx):
     for d in DESTS[:9]:
         svc.create(u, create_body(d))
     res = parallel([lambda d=d: svc.create(u, create_body(d)) for d in DESTS[9:9 + PARALLEL]])
-    chk.metrics["responses"] = tally(res)
+    chk.responses(res)
     chk.that(sum(s == 201 for s, _ in res) <= 1, "more than one create succeeded at 9")
     chk.invariants(ctx, u)
     fill_to_limit(ctx, svc, u, chk)
@@ -223,7 +244,7 @@ def s03_concurrent_creates_at_nine(ctx):
 def s04_same_route_created_concurrently(ctx):
     chk, u, svc = Check("s04_same_route_created_concurrently"), ctx.user("s04"), ctx.service()
     res = parallel([lambda: svc.create(u, create_body("LON")) for _ in range(PARALLEL)])
-    chk.metrics["responses"] = tally(res)
+    chk.responses(res)
     chk.that(sum(s == 201 for s, _ in res) == 1, "not exactly one create succeeded")
     chk.that(all(s == 201 or b["error"] in ("duplicate_subscription", "conflict") for s, b in res), "bad error")
     rows, q = chk.invariants(ctx, u, expect_rows=1)
@@ -239,7 +260,7 @@ def s05_concurrent_deletes(ctx):
     routes = [f"TPE-{d}" for d in DESTS[:10]]
     calls = [lambda r=r: svc.delete(u, r) for r in routes for _ in range(6)]
     res = parallel(calls)
-    chk.metrics["responses"] = tally(res)
+    chk.responses(res)
     per_route = {r: 0 for r in routes}
     for (status, _), call_route in zip(res, [r for r in routes for _ in range(6)]):
         if status == 204:
@@ -263,7 +284,8 @@ def s06_deletes_and_creates_at_limit(ctx):
     res = parallel(deletes + creates)
     deleted = sum(s == 204 for s, _ in res[:5])
     created = sum(s == 201 for s, _ in res[5:])
-    chk.metrics.update(responses=tally(res), deleted=deleted, created=created)
+    chk.responses(res)
+    chk.metrics.update(deleted=deleted, created=created)
     chk.that(created <= deleted, "more creates than freed slots")
     chk.invariants(ctx, u, expect_rows=10 - deleted + created)
     fill_to_limit(ctx, svc, u, chk)
@@ -277,7 +299,7 @@ def s07_route_edits_of_one_row(ctx):
         svc.create(u, create_body(d))
     targets = DESTS[9:9 + PARALLEL]
     res = parallel([lambda d=d: svc.patch(u, "TPE-OSA", {"origin": "KHH", "destination": d}) for d in targets])
-    chk.metrics["responses"] = tally(res)
+    chk.responses(res)
     winners = [b["route"] for s, b in res if s == 200]
     chk.that(len(winners) == 1, f"{len(winners)} route edits succeeded")
     chk.that(all(s == 200 or b["error"] in ("not_found", "conflict") for s, b in res), "bad error")
@@ -295,7 +317,7 @@ def s08_route_edits_onto_one_target(ctx):
     calls = [lambda d=d: svc.patch(u, f"TPE-{d}", {"origin": "TPE", "destination": "LON"})
              for d in DESTS[:10] for _ in range(6)]
     res = parallel(calls)
-    chk.metrics["responses"] = tally(res)
+    chk.responses(res)
     chk.that(sum(s == 200 for s, _ in res) == 1, "not exactly one row moved to TPE-LON")
     chk.that(all(s == 200 or b["error"] in ("duplicate_subscription", "not_found", "conflict") for s, b in res),
              "bad error")
@@ -315,7 +337,7 @@ def s09_edits_pauses_and_creates_at_limit(ctx):
              for i in range(20)]
     creates = [lambda d=d: svc.create(u, create_body(d)) for d in DESTS[10:30]]
     res = parallel(pauses + edits + creates)
-    chk.metrics["responses"] = tally(res)
+    chk.responses(res)
     chk.that(all(s in (200, 409) for s, _ in res[:40]), "edit/pause returned an unexpected status")
     chk.that(all(s == 409 for s, _ in res[40:]), "a create succeeded at 10")
     rows, q = chk.invariants(ctx, u, expect_rows=10)
@@ -331,7 +353,9 @@ def s10_legacy_and_new_endpoints(ctx):
     legacy = [lambda: svc.legacy_subscribe(u, {"plan_name": "tokyo", "target_price": 8000}) for _ in range(30)]
     creates = [lambda d=d: svc.create(u, create_body(d)) for d in DESTS[9:39]]
     res = parallel(legacy + creates)
-    chk.metrics["responses"] = tally(res)
+    chk.responses(res)
+    chk.that(all(st in (200, 409) for st, _ in res[:30]), "legacy: status other than 200/409")
+    chk.that(all(st in (201, 409) for st, _ in res[30:]), "new endpoint: status other than 201/409")
     rows, q = chk.invariants(ctx, u, expect_rows=10)
     legacy_won = "TPE-TYO" in rows
     chk.that(int(legacy_won) + sum(s == 201 for s, _ in res[30:]) == 1, "not exactly one new row")
@@ -357,7 +381,7 @@ def s11_m1_quota_initialisation(ctx):
                   lambda u=u: svc.legacy_subscribe(u, {"plan_name": "tokyo", "target_price": 7777}),
                   lambda u=u: svc.delete(u, "TPE-SEL")]
     res = parallel(calls)
-    chk.metrics["responses"] = tally(res)
+    chk.responses(res)
     for i, u in enumerate(users):
         c, l, d = res[3 * i: 3 * i + 3]
         changes = int(c[0] == 201) + int(d[0] == 204)
@@ -384,7 +408,8 @@ def s12_conflict_storm_on_one_quota(ctx):
     calls += [lambda d=d: svc.create(u, create_body(d)) for d in DESTS[5:60]]
     res = parallel(calls)
     reasons = {k: v - before.get(k, 0) for k, v in ctx.store.reasons.items() if v - before.get(k, 0)}
-    chk.metrics.update(responses=tally(res), cancellation_reasons=reasons,
+    chk.responses(res)
+    chk.metrics.update(cancellation_reasons=reasons,
                        committed=ctx.store.committed - before_committed)
     rows, q = chk.invariants(ctx, u)
     ok = sum(s in (201, 204) for s, _ in res)
@@ -460,11 +485,45 @@ def s14_idempotent_transaction_replay(ctx):
     return chk.result()
 
 
+def s15_same_row_write_storm(ctx):
+    """60 simultaneous writes to ONE row (TPE-TYO): 20 legacy upserts, 20 PATCH edits (target,
+    month, pause/resume), 10 deletes and 10 new-endpoint creates. On real DynamoDB the
+    single-item updates collide with the create/delete transactions on that row
+    (TransactionConflictException — the s10 finding of 2026-11-06). Every response must be an
+    expected status, never an unexpected 500, and rows and quota must stay consistent."""
+    chk, u, svc = Check("s15_same_row_write_storm"), ctx.user("s15"), ctx.service()
+    svc.legacy_subscribe(u, {"plan_name": "tokyo", "target_price": 9000})
+    for d in DESTS[:5]:
+        svc.create(u, create_body(d))
+    committed_before = ctx.store.committed
+    legacy = [lambda i=i: svc.legacy_subscribe(u, {"plan_name": "tokyo", "target_price": 7000 + i}) for i in range(20)]
+    edits = [lambda i=i: svc.patch(u, "TPE-TYO", [{"target_price": 6000 + i}, {"departure_month": "2027-04"},
+                                                  {"alerts_paused": True}, {"alerts_paused": False}][i % 4])
+             for i in range(20)]
+    deletes = [lambda: svc.delete(u, "TPE-TYO") for _ in range(10)]
+    creates = [lambda: svc.create(u, create_body("TYO", month="2027-02")) for _ in range(10)]
+    res = parallel(legacy + edits + deletes + creates)
+    chk.responses(res)
+    chk.that(all(st in (200, 409) for st, _ in res[:20]), "legacy: status other than 200/409")
+    chk.that(all(st in (200, 404, 409) for st, _ in res[20:40]), "PATCH: status other than 200/404/409")
+    chk.that(all(st in (204, 404, 409) for st, _ in res[40:50]), "DELETE: status other than 204/404/409")
+    chk.that(all(st in (201, 409) for st, _ in res[50:]), "create: status other than 201/409")
+    rows, q = chk.invariants(ctx, u)
+    # Every committed transaction here changes the row count (no route changes), so the
+    # version must have advanced by exactly that many — no lost or double quota updates.
+    commits = ctx.store.committed - committed_before
+    chk.that(q["version"] == 6 + commits, f"I3 version {q['version']} != 6 + {commits}")
+    chk.that(5 <= len(rows) <= 6, f"{len(rows)} rows")
+    chk.metrics["committed"] = commits
+    return chk.result()
+
+
 SCENARIOS = [s01_limit_counts_paused_and_expired, s02_concurrent_creates_from_empty,
              s03_concurrent_creates_at_nine, s04_same_route_created_concurrently, s05_concurrent_deletes,
              s06_deletes_and_creates_at_limit, s07_route_edits_of_one_row, s08_route_edits_onto_one_target,
              s09_edits_pauses_and_creates_at_limit, s10_legacy_and_new_endpoints, s11_m1_quota_initialisation,
-             s12_conflict_storm_on_one_quota, s13_bounded_retries_write_nothing, s14_idempotent_transaction_replay]
+             s12_conflict_storm_on_one_quota, s13_bounded_retries_write_nothing, s14_idempotent_transaction_replay,
+             s15_same_row_write_storm]
 
 
 def run_all(ctx, names=None):
