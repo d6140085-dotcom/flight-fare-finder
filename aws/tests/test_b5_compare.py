@@ -224,7 +224,9 @@ class LiveRoundTests(unittest.TestCase):
             summary = json.loads((out / "summary.json").read_text())
             self.assertEqual(summary["requests_sent"], 75)
             self.assertEqual(summary["rate_limit_lowest_remaining"], 525)
-            self.assertTrue(summary["compat"]["switch_ok"])
+            self.assertEqual(len(summary["coverage"]["both"]), 36)
+            self.assertEqual(summary["preliminary"]["technical_compatibility"]["verdict"], "PASS")
+            self.assertEqual(summary["preliminary"]["business_suitability"]["verdict"], "PASS")
             self.assertIn(b5.token_fingerprint(TOKEN), "\n".join(lines))
             self.assertNotIn(TOKEN, "\n".join(lines))
 
@@ -338,25 +340,151 @@ class RiskReportTests(unittest.TestCase):
             md = (out / "summary.md").read_text()
             self.assertIn("Cheaper offers rejected for airport mapping", md)
 
-    def test_summarize_evaluates_criteria_across_rounds(self):
-        with tempfile.TemporaryDirectory() as t:
-            dirs = []
-            for n in (1, 2):
-                api, clock = FakeApi(scenario=risky_scenario), Clock()
-                factory = lambda cap, interval, api=api, clock=clock: b5.LiveTransport(cap, interval, opener=api,
-                                                                                       clock=clock.clock, sleep=clock.sleep)
-                d = Path(t) / f"r{n}"
-                b5.main(["live", "--round", str(n), "--confirm-live", "--out", str(d)], env=dict(ENV_OK),
-                        out=lambda m: None, transport_factory=factory)
-                dirs.append(str(d))
-            lines = []
-            b5.main(["summarize", *dirs, "--out", str(Path(t) / "b5.json")], env={}, out=lines.append)
-            report = json.loads((Path(t) / "b5.json").read_text())
-            c = report["criteria"]
-            self.assertEqual(report["requests"], 150)
-            self.assertEqual(c["4_airport_rejections_understood"][0], "review")
-            self.assertEqual(c["3_currency_and_round_trip"][0], "pass")
-            self.assertIn(c["1_v3_availability_at_least_v1"][0], ("pass", "fail"))
+    def test_summarize_reports_two_separate_conclusions(self):
+        report, lines = run_rounds(risky_scenario, 2)
+        self.assertEqual(report["requests"], 150)
+        t, b = report["technical_compatibility"], report["business_suitability"]
+        # A malformed HTTP 200 body (TPE-NYC v3) is handled safely but is a parsing finding: FAIL to investigate
+        self.assertEqual(t["verdict"], "FAIL")
+        failing = {k for k, v in t["checks"].items() if v["verdict"] != "pass"}
+        self.assertEqual(failing, {"api_parsing"})
+        self.assertEqual(b["verdict"], "CONDITIONAL")
+        self.assertTrue(b["v1_fallback_advisable"])
+        self.assertFalse(b["v3_alone_sufficient"])
+        cov = report["coverage"]
+        self.assertIn("r1:TPE-NYC#2026-12", cov["v1_only"])
+        self.assertIn("r2:TPE-SYD#2026-12", cov["v3_only"])
+        self.assertIn("r1:TPE-KMJ#2027-03", cov["neither"])
+        self.assertTrue(any(c["destination_airport"] == "TSF" for c in b["false_negative_risks"]["airport_rejected_cheaper"]))
+        self.assertIn("A. Technical compatibility: FAIL", lines)
+        self.assertTrue(any(l.startswith("B. Business suitability: CONDITIONAL") for l in lines))
+
+
+def run_rounds(scenario, n, extra=(), env=None, summarize_env=None, tamper=None):
+    with tempfile.TemporaryDirectory() as t:
+        dirs = []
+        for k in range(1, n + 1):
+            api, clock = FakeApi(scenario=scenario), Clock()
+            factory = lambda cap, interval, api=api, clock=clock: b5.LiveTransport(cap, interval, opener=api,
+                                                                                   clock=clock.clock, sleep=clock.sleep)
+            d = Path(t) / f"r{k}"
+            b5.main(["live", "--round", str(k), "--confirm-live", "--out", str(d), *(extra if k == 1 else ())],
+                    env=dict(env or ENV_OK), out=lambda m: None, transport_factory=factory)
+            dirs.append(str(d))
+        if tamper:
+            tamper(Path(t))
+        lines = []
+        b5.main(["summarize", *dirs, "--out", str(Path(t) / "b5.json")], env=dict(summarize_env or {}), out=lines.append)
+        report = json.loads((Path(t) / "b5.json").read_text())
+        report["_md"] = (Path(t) / "b5.md").read_text()
+        return report, lines
+
+
+def scenario_with(**overrides):
+    """FakeApi.default with per-API overrides: overrides[api](q, dep, ret) -> body or None."""
+    def answer(api, q):
+        if api in overrides:
+            dep, ret = FakeApi.month_dates(q.get("departure_at") or q.get("depart_date"))
+            body = overrides[api](q, dep, ret)
+            if body is not None:
+                return body
+        return FakeApi().default(api, q)
+    return answer
+
+
+class ConclusionTests(unittest.TestCase):
+    def verdicts(self, report):
+        return report["technical_compatibility"]["verdict"], report["business_suitability"]["verdict"]
+
+    def test_clean_rounds_pass_both(self):
+        report, _ = run_rounds(None, 3)
+        self.assertEqual(self.verdicts(report), ("PASS", "PASS"))
+        self.assertTrue(report["business_suitability"]["v3_alone_sufficient"])
+        self.assertFalse(report["business_suitability"]["v1_fallback_advisable"])
+        self.assertEqual(report["price_differences"]["over_threshold"], 0)
+        self.assertIn("## A. Technical compatibility: PASS", report["_md"])
+        self.assertIn("## B. Business suitability: PASS", report["_md"])
+
+    def test_lower_v3_fare_with_other_dates_is_reviewed_not_failed(self):
+        def v3_lower(q, dep, ret):
+            m = q["departure_at"]
+            return {"success": True, "currency": "twd", "data": [offer(
+                5000, f"{m}-03T07:30:00+08:00", f"{m}-07T19:00:00+09:00", origin=q["origin"],
+                destination=q["destination"], origin_airport="TSA" if q["origin"] == "TPE" else q["origin"])]}
+        report, _ = run_rounds(scenario_with(v3=v3_lower), 1)
+        self.assertEqual(self.verdicts(report), ("PASS", "PASS"))   # price gaps never fail B5
+        pd = report["price_differences"]
+        self.assertEqual(pd["over_threshold"], 36)
+        case = next(c for c in pd["cases"] if c["item"].endswith("TPE-TYO#2026-12"))
+        self.assertEqual((case["lower"], case["v1_price"], case["v3_price"]), ("v3", 9000, 5000))
+        self.assertFalse(case["same_departure_date"])
+        self.assertFalse(case["same_return_date"])
+        self.assertEqual(case["v3_airports"][0], "TSA")
+        self.assertTrue(case["both_round_trip"] and case["both_twd"])
+        self.assertGreater(case["v1_freshness"]["hours_left"], 0)
+        self.assertIn("v3 provides no freshness field", case["v3_freshness"]["note"])
+
+    def test_low_v3_coverage_fails_business_not_technical(self):
+        report, _ = run_rounds(scenario_with(v3=lambda q, dep, ret: {"success": True, "currency": "twd", "data": []}
+                                             if q["destination"] not in ("TYO",) else None), 1)
+        self.assertEqual(self.verdicts(report), ("PASS", "FAIL"))
+        self.assertGreater(len(report["coverage"]["v1_only"]), 20)
+        self.assertTrue(report["business_suitability"]["v1_fallback_advisable"])
+
+    def test_some_v1_only_coverage_is_conditional(self):
+        report, _ = run_rounds(scenario_with(v3=lambda q, dep, ret: {"success": True, "currency": "twd", "data": []}
+                                             if q["destination"] in ("KMJ", "VCE") else None), 1)
+        self.assertEqual(self.verdicts(report), ("PASS", "CONDITIONAL"))
+        self.assertIn("keep v1 available as a fallback", report["business_suitability"]["reason"])
+
+    def test_airport_mapping_loss_alone_is_conditional_with_reason(self):
+        def vce(q, dep, ret):
+            if q["destination"] != "VCE":
+                return None
+            return {"success": True, "currency": "twd", "data": [
+                offer(21000, dep, ret, origin="TPE", destination="VCE", destination_airport="TSF"),
+                offer(26000, dep, ret, origin="TPE", destination="VCE", destination_airport="VCE")]}
+        report, _ = run_rounds(scenario_with(v3=vce), 1)
+        b = report["business_suitability"]
+        self.assertEqual(self.verdicts(report), ("PASS", "CONDITIONAL"))
+        self.assertIn("review airport mapping", b["reason"])
+        self.assertFalse(b["v1_fallback_advisable"])
+        self.assertFalse(b["v3_alone_sufficient"])
+
+    def test_currency_problems_fail_technical(self):
+        usd_body = lambda q, dep, ret: {"success": True, "currency": "usd", "data": [offer(290, dep, ret)]}
+        report, _ = run_rounds(scenario_with(v3=usd_body), 1)
+        self.assertEqual(report["technical_compatibility"]["checks"]["currency"]["verdict"], "fail")
+        self.assertEqual(report["technical_compatibility"]["verdict"], "FAIL")
+
+    def test_currency_evidence_required_and_usd_ratio_checked(self):
+        no_cur = lambda q, dep, ret: {"success": True, "data": [offer(8800, dep, ret)]}
+        v1_no_cur = lambda q, dep, ret: {"success": True, "data": {q["destination"]: {"0": offer(9000, dep, ret)}}}
+        report, _ = run_rounds(scenario_with(v1=v1_no_cur, v3=no_cur), 1)
+        self.assertEqual(report["technical_compatibility"]["checks"]["currency"]["verdict"], "not_verified")
+        self.assertEqual(report["technical_compatibility"]["verdict"], "FAIL")
+        ok_usd = lambda q, dep, ret: {"success": True, "data": [offer(8800 if q["currency"] == "twd" else 280, dep, ret)]}
+        report, _ = run_rounds(scenario_with(v1=v1_no_cur, v3=ok_usd), 1, extra=["--usd"])
+        self.assertEqual(report["technical_compatibility"]["checks"]["currency"]["verdict"], "pass")
+        ignored = lambda q, dep, ret: {"success": True, "data": [offer(8800, dep, ret)]}       # same number in USD
+        report, _ = run_rounds(scenario_with(v1=v1_no_cur, v3=ignored), 1, extra=["--usd"])
+        self.assertEqual(report["technical_compatibility"]["checks"]["currency"]["verdict"], "fail")
+
+    def test_aborted_round_fails_technical_until_repeated(self):
+        report, _ = run_rounds(None, 1, tamper=lambda root: (root / "r1" / "summary.json").write_text(
+            json.dumps(dict(json.loads((root / "r1" / "summary.json").read_text()), aborted="HTTP 429: rate limited"))))
+        self.assertEqual(report["technical_compatibility"]["checks"]["api_error_handling"]["verdict"], "fail")
+        self.assertEqual(report["technical_compatibility"]["verdict"], "FAIL")
+
+    def test_token_found_in_results_fails_token_safety(self):
+        report, _ = run_rounds(None, 1, summarize_env={"TP_TOKEN": TOKEN},
+                               tamper=lambda root: (root / "r1" / "notes.txt").write_text(f"oops {TOKEN}"))
+        self.assertEqual(report["technical_compatibility"]["checks"]["token_safety"]["verdict"], "fail")
+        self.assertNotIn(TOKEN, json.dumps(report))
+
+    def test_prices_never_choose_the_api(self):
+        report, _ = run_rounds(None, 1)
+        self.assertIn("never select the production API", report["business_suitability"]["note"])
 
 
 class SanitizationTests(unittest.TestCase):

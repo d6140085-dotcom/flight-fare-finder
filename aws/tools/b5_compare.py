@@ -11,7 +11,8 @@ Commands (Windows PowerShell: use `python` or `py -3.12`, and backslashes in pat
                            The approved live test. Also needs B5_LIVE_APPROVED=yes and the
                            token in TP_TOKEN. Sequential, rate-limited, capped.
   check-output DIR         Scan a results folder for the token, emails and secret-like strings.
-  summarize DIR [DIR ...]  Combine rounds and evaluate the proposed B5 acceptance criteria.
+  summarize DIR [DIR ...]  Combine rounds: A. technical compatibility (PASS/FAIL) and
+                           B. business suitability (PASS/CONDITIONAL/FAIL).
 
 Importing this module or running the unit tests never makes a network request: the only code
 that opens a connection is LiveTransport, which is constructed only by `live` after all gates.
@@ -289,6 +290,7 @@ def run_round(requests, *, token, transport, catalog, now, out_dir, v3_limit=30,
         meta = transport.last or {}
         offers, signals = analyse(req, result, meta.get("body"), catalog, now)
         row = {"seq": req.seq, "api": req.api, "variant": req.variant, "item": req.item_key,
+               "month": req.month, "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                "url": client.request_url(req.origin, req.destination, req.month,
                                          "usd" if req.variant == "usd" else "twd"),
                "status": meta.get("status"), "elapsed_ms": meta.get("elapsed_ms"), "rate_limit": meta.get("rate_limit", {}),
@@ -321,6 +323,8 @@ def run_round(requests, *, token, transport, catalog, now, out_dir, v3_limit=30,
             comparisons[key] = compat.compare(res["v1:twd"], res["v3:twd"])
     summary = summarize_rows(rows, comparisons)
     summary.update({"aborted": aborted, "requests_planned": len(requests), "requests_sent": transport.count})
+    summary["preliminary"] = evaluate(rows, [{"dir": str(out_dir), "aborted": aborted}], token=None,
+                                      scan_dirs=False)
     write_json(out_dir / "requests.jsonl", rows, token, jsonl=True)
     write_json(out_dir / "comparisons.json", comparisons, token)
     write_json(out_dir / "summary.json", summary, token)
@@ -336,6 +340,213 @@ def write_json(path, data, token, jsonl=False):
 
 
 # ---- summaries and acceptance criteria ------------------------------------------------------
+#
+# B5 reports two separate conclusions (plan §5.7):
+#   A. Technical compatibility (PASS / FAIL): is the integration correct and safe?
+#   B. Business suitability (PASS / CONDITIONAL / FAIL): is v3's fare coverage good enough, and
+#      should v1 stay available as a fallback?
+# Relative prices between v1 and v3 are reported for review only. They never fail B5 and never
+# select the production API on their own.
+
+FORMAT_REASONS = ("bad_price", "bad_departure", "bad_return", "not_object")
+KNOWN_ERROR_REASONS = ("malformed", "unavailable", "api_unsuccessful", "currency_mismatch")
+PRICE_GAP_PCT = 10.0
+USD_RATIO_RANGE = (10.0, 60.0)      # plausible TWD per USD; outside means currency=twd was ignored
+V3_SHARE_FLOOR = 0.5                # v3 below half of all covered route/months: not suitable alone
+
+
+def twd_rows(rows, api):
+    return {(r.get("round", ""), r["item"]): r for r in rows if r["api"] == api and r["variant"] == "twd"}
+
+
+def label(key):
+    rnd, item = key
+    return f"{rnd}:{item}" if rnd else item
+
+
+def coverage(rows):
+    """Valid-fare coverage per endpoint, computed per (round, route/month)."""
+    v1, v3 = twd_rows(rows, "v1"), twd_rows(rows, "v3")
+    keys = sorted(set(v1) & set(v3))
+    ok = lambda d, k: d[k]["kind"] == tp.OK
+    groups = {"both": [k for k in keys if ok(v1, k) and ok(v3, k)],
+              "v1_only": [k for k in keys if ok(v1, k) and not ok(v3, k)],
+              "v3_only": [k for k in keys if ok(v3, k) and not ok(v1, k)],
+              "neither": [k for k in keys if not ok(v1, k) and not ok(v3, k)]}
+    n = len(keys)
+    rate = lambda count: round(count / n * 100, 1) if n else None
+    kinds = lambda d: dict(Counter(d[k]["kind"] for k in keys))
+    return {"compared": n,
+            "v1_valid": len(groups["both"]) + len(groups["v1_only"]),
+            "v3_valid": len(groups["both"]) + len(groups["v3_only"]),
+            "v1_valid_pct": rate(len(groups["both"]) + len(groups["v1_only"])),
+            "v3_valid_pct": rate(len(groups["both"]) + len(groups["v3_only"])),
+            "union_valid": n - len(groups["neither"]), "neither_pct": rate(len(groups["neither"])),
+            "v1_kinds": kinds(v1), "v3_kinds": kinds(v3),
+            **{name: [label(k) for k in ks] for name, ks in groups.items()}}
+
+
+def parse_when(value):
+    w = tp.parse_when(value)
+    return w and (w[1] or datetime(w[0].year, w[0].month, w[0].day, tzinfo=timezone.utc))
+
+
+def freshness(row):
+    """v1 offers carry expires_at; v3 offers carry no freshness field."""
+    if row["api"] != "v1" or not row["chosen"]:
+        return {"source": row["api"], "expires_at": None, "hours_left": None,
+                "note": "v3 provides no freshness field" if row["api"] == "v3" else "no fare"}
+    match = next((o for o in row["offers"] if o["verdict"] == "accepted"
+                  and o.get("departure_at") == row["chosen"]["depart_at"]
+                  and tp.to_price(o.get("price")) == row["chosen"]["price"]), None)
+    exp, checked = parse_when(match and match.get("expires_at")), parse_when(row.get("checked_at"))
+    hours = round((exp - checked).total_seconds() / 3600, 1) if exp and checked else None
+    return {"source": "v1", "expires_at": match and match.get("expires_at"), "hours_left": hours}
+
+
+def price_differences(rows, threshold=PRICE_GAP_PCT):
+    """Every overlapping route/month whose v1 and v3 cheapest fares differ by more than the
+    threshold, with the facts needed to explain the gap. Never a failure by itself."""
+    v1, v3 = twd_rows(rows, "v1"), twd_rows(rows, "v3")
+    out, overlapping = [], 0
+    for k in sorted(set(v1) & set(v3)):
+        a, b = v1[k]["chosen"], v3[k]["chosen"]
+        if not (a and b):
+            continue
+        overlapping += 1
+        diff = abs(b["price"] - a["price"]) / a["price"] * 100
+        if diff <= threshold:
+            continue
+        rt = lambda c: bool(c["return_at"]) and c["return_at"][:10] >= c["depart_at"][:10]
+        out.append({"item": label(k), "v1_price": a["price"], "v3_price": b["price"], "diff_pct": round(diff, 1),
+                    "lower": "v3" if b["price"] < a["price"] else "v1",
+                    "v1_dates": [a["depart_at"][:10], a["return_at"][:10]],
+                    "v3_dates": [b["depart_at"][:10], b["return_at"][:10]],
+                    "same_departure_date": a["depart_at"][:10] == b["depart_at"][:10],
+                    "same_return_date": a["return_at"][:10] == b["return_at"][:10],
+                    "v3_airports": [b["origin_airport"], b["destination_airport"]],
+                    "both_round_trip": rt(a) and rt(b), "both_twd": a["currency"] == b["currency"] == "TWD",
+                    "v1_freshness": freshness(v1[k]), "v3_freshness": freshness(v3[k])})
+    return {"overlapping": overlapping, "over_threshold": len(out), "threshold_pct": threshold, "cases": out}
+
+
+def departed_at_check(departure, checked_at):
+    """Same rule as production validation: aware times compare as instants, dates as Taipei dates."""
+    dep, chk = tp.parse_when(departure), parse_when(checked_at)
+    if not dep or not chk:
+        return False
+    return dep[1] < chk if dep[1] else dep[0] < months.today(chk)
+
+
+def check(ok, detail, not_verified=False):
+    return {"verdict": "not_verified" if not_verified else ("pass" if ok else "fail"), "detail": detail}
+
+
+def technical(rows, rounds, token=None, scan_dirs=True):
+    accepted = [(r, o) for r in rows for o in r["offers"] if o["verdict"] == "accepted"]
+    twd = [r for r in rows if r["variant"] != "usd"]
+    fmt = Counter(o["reason"] for r in rows for o in r["offers"] if o["reason"] in FORMAT_REASONS)
+    malformed_200 = [r["item"] for r in rows if r["status"] == 200 and r["reason"] == "malformed"]
+    no_return = [r["item"] for r, o in accepted if not o.get("return_at")]
+    bad_order = [r["item"] for r, o in accepted
+                 if o.get("return_at") and o.get("departure_at") and o["return_at"][:10] < o["departure_at"][:10]]
+    v3_one_way_param = [r["item"] for r in rows if r["api"] == "v3" and "one_way=false" not in r["url"]]
+    off_month = [r["item"] for r, o in accepted if str(o.get("departure_at", ""))[:7] != r.get("month", r["item"][-7:])]
+    departed = [r["item"] for r, o in accepted if departed_at_check(o.get("departure_at"), r.get("checked_at"))]
+    wrong_cur = sorted({str(r["response_currency"]) for r in twd if r["response_currency"] not in (None, "twd", "TWD")})
+    chosen_cur = sorted({r["chosen"]["currency"] for r in twd if r["chosen"]} - {"TWD"})
+    ratios = []
+    usd = twd_rows([dict(r, variant="twd") for r in rows if r["variant"] == "usd"], "v3")
+    for k, r in twd_rows(rows, "v3").items():
+        if k in usd and r["chosen"] and usd[k]["chosen"]:
+            ratios.append(r["chosen"]["price"] / usd[k]["chosen"]["price"])
+    bad_ratio = [round(x, 2) for x in ratios if not USD_RATIO_RANGE[0] <= x <= USD_RATIO_RANGE[1]]
+    currency_evidence = any(r["response_currency"] for r in twd) or bool(ratios)
+    unknown_errors = [r["item"] for r in rows if r["kind"] == tp.ERROR and not
+                      (str(r["reason"]).startswith("http_") or r["reason"] in KNOWN_ERROR_REASONS)]
+    unmapped_status = [r["item"] for r in rows if r["status"] not in (None, 200) and r["reason"] != f"http_{r['status']}"]
+    aborted = [f"{x['dir']}: {x['aborted']}" for x in rounds if x.get("aborted")]
+    leaks = {}
+    if scan_dirs:
+        for x in rounds:
+            leaks.update({f"{x['dir']}/{k}": v for k, v in check_output(x["dir"], token).items()})
+    rejected = Counter(reason for r in rows for reason, n in r["rejected"].items() for _ in range(n))
+    checks = {
+        "api_parsing": check(not malformed_200 and not fmt,
+                             f"HTTP 200 responses not parseable: {malformed_200}; offers with unexpected field formats: {dict(fmt)}"),
+        "round_trip": check(not no_return and not bad_order and not v3_one_way_param,
+                            f"accepted offers without return: {len(no_return)}; return before departure: {len(bad_order)}; "
+                            f"v3 requests without one_way=false: {len(v3_one_way_param)}; one-way offers rejected: {rejected.get('one_way', 0)}"),
+        "departure_and_return_dates": check(not departed and not bad_order,
+                                            f"accepted offers already departed: {len(departed)}; rejected as departed: "
+                                            f"{rejected.get('departed', 0)}, expired: {rejected.get('expired', 0)}"),
+        "currency": check(not wrong_cur and not chosen_cur and not bad_ratio,
+                          f"non-TWD response currency: {wrong_cur}; non-TWD fares: {chosen_cur}; TWD/USD ratios outside "
+                          f"{USD_RATIO_RANGE}: {bad_ratio}; ratios measured: {len(ratios)}",
+                          not_verified=not currency_evidence and not wrong_cur and not chosen_cur),
+        "wrong_month_rejection": check(not off_month, f"accepted offers outside the requested month: {len(off_month)}; "
+                                                      f"wrong-month offers rejected: {rejected.get('wrong_month', 0)}"),
+        "malformed_response_handling": check(not unknown_errors,
+                                             f"errors with unexpected reasons: {unknown_errors}; malformed responses handled: "
+                                             f"{sum(r['reason'] == 'malformed' for r in rows)}"),
+        "api_error_handling": check(not unmapped_status and not aborted,
+                                    f"non-200 statuses not mapped to an error: {unmapped_status}; rounds stopped early "
+                                    f"(repeat them): {aborted}; statuses seen: {dict(Counter(str(r['status']) for r in rows))}"),
+        "token_safety": check(not leaks, f"secret-scan findings: {leaks}" if leaks else
+                              ("all result files clean" if scan_dirs else "scan runs after the round (see live output)")),
+        "no_production_side_effects": check(True, "by construction: the tool has no AWS client, no database, Lambda, "
+                                                  "SQS or email code (offline tests verify); only Travelpayouts was called"),
+    }
+    verdict = "PASS" if all(c["verdict"] == "pass" for c in checks.values()) else "FAIL"
+    return {"verdict": verdict, "checks": checks}
+
+
+def business(rows, cov):
+    airport = [dict(c, item=r["item"]) for r in rows if r["api"] == "v3" and r["variant"] == "twd"
+               for c in r["signals"]["airport_rejected_cheaper"]]
+    all_rejected = [label((r.get("round", ""), r["item"])) for r in rows
+                    if r["variant"] == "twd" and r["reason"] == "all_rejected"]
+    union, v3_valid = cov["union_valid"], cov["v3_valid"]
+    v3_share = v3_valid / union if union else 0
+    v3_alone = union > 0 and not cov["v1_only"] and not airport
+    fallback = bool(cov["v1_only"])
+    conditions = []
+    if fallback:
+        conditions.append(f"keep v1 available as a fallback: {len(cov['v1_only'])} route/month(s) had a valid fare only from v1")
+    if airport:
+        conditions.append(f"review airport mapping (plan §6a): {len(airport)} cheaper v3 offer(s) rejected for airport")
+    if cov["neither_pct"] and cov["neither_pct"] > 25:
+        conditions.append(f"{cov['neither_pct']} % of route/months had no valid fare from either API (expected on thin routes; review)")
+    if union == 0:
+        verdict, why = "FAIL", "no valid fare from either API; nothing to judge"
+    elif v3_share < V3_SHARE_FLOOR:
+        verdict, why = "FAIL", f"v3 covers {round(v3_share * 100, 1)} % of the route/months that have any valid fare (< {int(V3_SHARE_FLOOR * 100)} %)"
+    elif v3_alone and not conditions:
+        verdict, why = "PASS", "v3 covers every route/month v1 covers, with no airport-mapping losses"
+    else:
+        verdict, why = "CONDITIONAL", "; ".join(conditions)
+    return {"verdict": verdict, "reason": why,
+            "metrics": {"v1_valid_pct": cov["v1_valid_pct"], "v3_valid_pct": cov["v3_valid_pct"],
+                        "v3_share_of_covered_pct": round(v3_share * 100, 1) if union else None,
+                        "both": len(cov["both"]), "v1_only": len(cov["v1_only"]), "v3_only": len(cov["v3_only"]),
+                        "neither": len(cov["neither"]), "neither_pct": cov["neither_pct"],
+                        "v1_missing_data_pct": pct_not_ok(cov["v1_kinds"]), "v3_missing_data_pct": pct_not_ok(cov["v3_kinds"])},
+            "false_negative_risks": {"airport_rejected_cheaper": airport, "all_offers_rejected": all_rejected},
+            "v3_alone_sufficient": v3_alone, "v1_fallback_advisable": fallback, "conditions": conditions,
+            "note": "Relative v1/v3 prices are reported for review and never select the production API on their own. "
+                    "The owner decides FARE_API."}
+
+
+def pct_not_ok(kinds):
+    n = sum(kinds.values())
+    return round((n - kinds.get(tp.OK, 0)) / n * 100, 1) if n else None
+
+
+def evaluate(rows, rounds, token=None, scan_dirs=True):
+    cov = coverage(rows)
+    return {"technical_compatibility": technical(rows, rounds, token, scan_dirs),
+            "business_suitability": business(rows, cov), "coverage": cov, "price_differences": price_differences(rows)}
+
 
 def summarize_rows(rows, comparisons):
     by = lambda api, variant: [r for r in rows if r["api"] == api and r["variant"] == variant]
@@ -364,50 +575,57 @@ def summarize_rows(rows, comparisons):
         base = next((b for b in by("v3", "twd") if b["item"] == r["item"]), None)
         if base and base["chosen"] and r["chosen"]:
             usd_ratio.append({"item": r["item"], "twd_per_usd": round(base["chosen"]["price"] / r["chosen"]["price"], 2)})
-    v1_only = sorted(k for k, c in comparisons.items() if c["v1_kind"] == tp.OK and c["v3_kind"] != tp.OK)
-    v3_only = sorted(k for k, c in comparisons.items() if c["v3_kind"] == tp.OK and c["v1_kind"] != tp.OK)
+    cov = coverage(rows)
     return {"tool_version": TOOL_VERSION, "kinds": kinds, "risks": dict(sorted(risks.items())),
-            "airport_rejected_cheaper": airport_cases, "availability": {"v1_only": v1_only, "v3_only": v3_only},
-            "compat": compat.summarize(list(comparisons.values())) if comparisons else None,
-            "price_gaps_over_10pct": sorted(k for k, c in comparisons.items() if c.get("both_ok") and not c["within_tolerance"]),
+            "airport_rejected_cheaper": airport_cases,
+            "coverage": cov, "availability": {"v1_only": cov["v1_only"], "v3_only": cov["v3_only"]},
+            "price_gaps_over_10pct": [c["item"] for c in price_differences(rows)["cases"]],
             "response_currency": dict(currencies), "market_check": market, "usd_ratio": usd_ratio,
             "rate_limit_lowest_remaining": rate_low,
             "http_status": dict(Counter(str(r["status"]) for r in rows))}
 
 
-def evaluate_criteria(comparisons, rows):
-    """Proposed B5 acceptance criteria (plan §5.7). Returns {criterion: (verdict, detail)}."""
-    s = compat.summarize(comparisons) if comparisons else {"v1_ok": 0, "v3_ok": 0, "both_ok": 0, "within_tolerance": 0}
-    both = s["both_ok"]
-    within_share = s["within_tolerance"] / both if both else 0
-    validated_bad = [o for r in rows for o in r["offers"]
-                     if o["verdict"] == "accepted" and (not o.get("return_at"))]
-    currencies = {str(r.get("response_currency")).lower() for r in rows if r["variant"] != "usd"}
-    airport = sum(len(r["signals"]["airport_rejected_cheaper"]) for r in rows)
-    return {
-        "1_v3_availability_at_least_v1": ("pass" if s["v3_ok"] >= s["v1_ok"] and s["v3_ok"] > 0 else "fail",
-                                          f"v1 ok {s['v1_ok']}, v3 ok {s['v3_ok']}"),
-        "2_prices_within_10pct_in_90pct": ("pass" if both and within_share >= 0.9 else ("fail" if both else "no data"),
-                                           f"{s['within_tolerance']}/{both} within 10 %; gaps need explanation"),
-        "3_currency_and_round_trip": ("pass" if currencies <= {"twd", "none"} and not validated_bad else "review",
-                                      f"response currencies {sorted(currencies)}; accepted offers without return {len(validated_bad)}"),
-        "4_airport_rejections_understood": ("review" if airport else "pass",
-                                            f"{airport} cheaper offer(s) rejected for airport mapping (plan §6a)"),
-    }
-
-
 def summary_markdown(s):
+    cov = s["coverage"]
     lines = ["# B5 round summary", "", f"- Aborted: {s.get('aborted') or 'no'}",
              f"- Requests: {s.get('requests_sent')} sent of {s.get('requests_planned')} planned",
              f"- HTTP status: {s['http_status']}", f"- Result kinds: {s['kinds']}",
-             f"- v1/v3 compat: {s['compat']}", f"- Only v1 had a fare: {s['availability']['v1_only']}",
-             f"- Only v3 had a fare: {s['availability']['v3_only']}",
-             f"- Price gaps over 10 %: {s['price_gaps_over_10pct']}", f"- Response currency: {s['response_currency']}",
+             f"- Coverage: v1 {cov['v1_valid']}/{cov['compared']}, v3 {cov['v3_valid']}/{cov['compared']}, "
+             f"both {len(cov['both'])}, only v1 {cov['v1_only']}, only v3 {cov['v3_only']}, neither {cov['neither']}",
+             f"- Price gaps over 10 % (review only): {s['price_gaps_over_10pct']}",
+             f"- Response currency: {s['response_currency']}",
              f"- Market check: {s['market_check']}", f"- TWD per USD (sanity): {s['usd_ratio']}",
-             f"- Lowest rate-limit remaining seen: {s['rate_limit_lowest_remaining']}", "", "## Risk signals", ""]
+             f"- Lowest rate-limit remaining seen: {s['rate_limit_lowest_remaining']}"]
+    if s.get("preliminary"):
+        p = s["preliminary"]
+        lines += [f"- Preliminary (this round only): technical {p['technical_compatibility']['verdict']}, "
+                  f"business {p['business_suitability']['verdict']}"]
+    lines += ["", "## Risk signals", ""]
     lines += [f"- {k}: {v}" for k, v in s["risks"].items()] or ["- none"]
     lines += ["", "## Cheaper offers rejected for airport mapping", ""]
     lines += [f"- {c}" for c in s["airport_rejected_cheaper"]] or ["- none"]
+    return "\n".join(lines) + "\n"
+
+
+def report_markdown(r):
+    t, b, cov, pd = r["technical_compatibility"], r["business_suitability"], r["coverage"], r["price_differences"]
+    lines = ["# B5 result", "", f"Rounds: {', '.join(x['dir'] for x in r['rounds'])}; requests: {r['requests']}", "",
+             f"## A. Technical compatibility: {t['verdict']}", "", "| Check | Verdict | Detail |", "|---|---|---|"]
+    lines += [f"| {k} | {v['verdict']} | {v['detail']} |" for k, v in t["checks"].items()]
+    lines += ["", f"## B. Business suitability: {b['verdict']}", "", f"{b['reason']}", ""]
+    lines += [f"- {k}: {v}" for k, v in b["metrics"].items()]
+    lines += [f"- v3 alone sufficient: {b['v3_alone_sufficient']}", f"- v1 fallback advisable: {b['v1_fallback_advisable']}"]
+    lines += [f"- condition: {c}" for c in b["conditions"]]
+    lines += ["", f"_{b['note']}_", "", "## Coverage", "",
+              f"- Only v1: {cov['v1_only']}", f"- Only v3: {cov['v3_only']}", f"- Neither: {cov['neither']}", "",
+              f"## Price differences over {pd['threshold_pct']} % (review only, never a failure)", "",
+              f"{pd['over_threshold']} of {pd['overlapping']} overlapping route/months.", ""]
+    lines += [f"- {c['item']}: v1 {c['v1_price']} vs v3 {c['v3_price']} ({c['diff_pct']} %, lower: {c['lower']}); "
+              f"dates v1 {c['v1_dates']} v3 {c['v3_dates']}; v3 airports {c['v3_airports']}; "
+              f"round trip {c['both_round_trip']}; TWD {c['both_twd']}; v1 expires in {c['v1_freshness']['hours_left']} h"
+              for c in pd["cases"]] or ["- none"]
+    lines += ["", "## False-negative risks", "", f"- Airport mapping: {b['false_negative_risks']['airport_rejected_cheaper'] or 'none'}",
+              f"- All offers rejected: {b['false_negative_risks']['all_offers_rejected'] or 'none'}"]
     return "\n".join(lines) + "\n"
 
 
@@ -477,18 +695,29 @@ def cmd_check(a, env, out):
 
 
 def cmd_summarize(a, env, out):
-    rows, comparisons = [], []
+    rows, rounds = [], []
     for d in a.dirs:
         d = Path(d)
-        rows += [json.loads(line) for line in (d / "requests.jsonl").read_text(encoding="utf-8").splitlines() if line]
-        comparisons += list(json.loads((d / "comparisons.json").read_text(encoding="utf-8")).values())
-    criteria = evaluate_criteria(comparisons, rows)
-    report = {"rounds": [str(d) for d in a.dirs], "requests": len(rows), "criteria": criteria,
-              "compat": compat.summarize(comparisons) if comparisons else None}
-    text = json.dumps(report, ensure_ascii=False, indent=2)
+        summary = json.loads((d / "summary.json").read_text(encoding="utf-8"))
+        rounds.append({"dir": str(d), "aborted": summary.get("aborted")})
+        rows += [dict(json.loads(line), round=d.name)
+                 for line in (d / "requests.jsonl").read_text(encoding="utf-8").splitlines() if line]
+    token = (env.get(TOKEN_ENV) or "").strip() or None
+    report = dict(evaluate(rows, rounds, token), rounds=rounds, requests=len(rows))
     if a.out:
-        Path(a.out).write_text(text, encoding="utf-8")
-    out(text)
+        out_path = Path(a.out)
+        write_json(out_path, report, token)
+        out_path.with_suffix(".md").write_text(sanitize(report_markdown(report), token), encoding="utf-8")
+    t, b = report["technical_compatibility"], report["business_suitability"]
+    out(f"A. Technical compatibility: {t['verdict']}")
+    for k, v in t["checks"].items():
+        out(f"   {v['verdict']:13s} {k}")
+    out(f"B. Business suitability: {b['verdict']} - {b['reason']}")
+    out(f"   v3 alone sufficient: {b['v3_alone_sufficient']}; v1 fallback advisable: {b['v1_fallback_advisable']}")
+    out(f"   Price gaps over 10 % (review only): {report['price_differences']['over_threshold']} of "
+        f"{report['price_differences']['overlapping']}")
+    if a.out:
+        out(f"Written: {a.out} and {Path(a.out).with_suffix('.md')}")
     return 0
 
 
