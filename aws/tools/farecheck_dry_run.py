@@ -1,5 +1,6 @@
-"""Offline DRY_RUN of the M1.4 Phase 2A fare check: wrapper + parser in-process, with fixture
-subscriptions and recorded Travelpayouts responses. No AWS, no network, no SQS, no email.
+"""Offline DRY_RUN of the M1.4 Phase 2A fare check: the wrapper's in-process dry-run path (the
+same code the deployed dry run uses), with fixture subscriptions and recorded Travelpayouts
+responses. No AWS, no network, no Lambda, no SQS, no email.
 
 Usage:
   python3 aws/tools/farecheck_dry_run.py [--api v1|v3] [--now 2026-11-06T13:00:00Z]
@@ -8,8 +9,8 @@ Usage:
 
 Response fixtures are looked up as <api>_<origin>_<destination>_<month>_<currency>.json
 (lower-case); a missing file behaves like an unreachable API (fare_check kind "error").
-Output: one JSON document with the work items and each parser result (subscribers appear only
-as short hashes, never as addresses).
+Output: one JSON document with the work items and the dry-run report (no addresses: the dry
+run reads subscriptions without email).
 """
 import argparse
 import json
@@ -21,7 +22,7 @@ from pathlib import Path
 AWS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AWS / "lambdas" / "flight-fare-check"))
 
-from farecheck import config, effects, runner  # noqa: E402
+from farecheck import config, effects, runner, travelpayouts  # noqa: E402
 
 
 class FixtureTransport:
@@ -48,16 +49,15 @@ def main(argv=None):
     ap.add_argument("--responses", default=str(fx))
     a = ap.parse_args(argv)
     now = datetime.fromisoformat(a.now.replace("Z", "+00:00"))
-    settings = config.Settings.from_env({"FARE_API": a.api, "DRY_RUN": "1"})
+    settings = config.Settings.from_env({"FARECHECK_MODE": "dry_run", "FARE_API": a.api})
     catalog = config.load_catalog()
     rows = json.loads(Path(a.subscriptions).read_text(encoding="utf-8"))
-    reader, invoker, logs = effects.ListReader(rows), effects.RecordingInvoker(), []
-    plan = runner.run_wrapper(settings=settings, catalog=catalog, reader=reader, invoker=invoker, now=now,
-                              log=logs.append)
-    transport = FixtureTransport(a.responses, a.api)
-    results = [runner.run_parser(p, settings=settings, catalog=catalog, token="offline-token", reader=reader,
-                                 now=now, transport=transport, log=logs.append) for p in invoker.payloads]
-    print(json.dumps({"dry_run": True, "api": a.api, "now": a.now, "wrapper": plan, "parser": results,
+    transport, logs = FixtureTransport(a.responses, a.api), []
+    client = travelpayouts.Client("offline-token", catalog, now, api=a.api, transport=transport, log=logs.append)
+    evaluator = runner.DryRunEvaluator(settings=settings, catalog=catalog, client=client, as_of=now, log=logs.append)
+    plan = runner.run_wrapper(settings=settings, catalog=catalog, reader=effects.ListReader(rows), now=now,
+                              dry_evaluator=evaluator, log=logs.append)
+    print(json.dumps({"dry_run": True, "api": a.api, "now": a.now, "result": plan,
                       "api_requests": transport.calls, "log": logs}, ensure_ascii=False, indent=2, default=str))
 
 

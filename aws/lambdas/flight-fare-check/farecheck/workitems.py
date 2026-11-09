@@ -1,7 +1,14 @@
 """Turn subscription rows into deduplicated fare lookups: one per (origin, destination,
-effective month) with at least one active row. Rows are read without `email`."""
+effective month) with at least one active row. Rows are read without `email`.
+
+All month rules use one `as_of` instant per scheduler run (Asia/Taipei calendar). The wrapper
+resolves it once and passes it downstream, so a run that crosses midnight at the end of a month
+never mixes two months (no skipped or duplicated month).
+"""
+import math
 from collections import Counter
 from dataclasses import dataclass
+from datetime import timezone
 
 from . import months
 
@@ -23,11 +30,14 @@ class WorkItem:
         """Fare-check key (API contract §3.4)."""
         return f"{self.route}#{self.month}"
 
-    def payload(self, dry_run=False):
-        p = {"origin": self.origin, "destination": self.destination, "route": self.route, "month": self.month}
-        if dry_run:
-            p["dry_run"] = True
-        return p
+    def payload(self, as_of):
+        """Live parser payload: the resolved month plus the scheduler's `as_of` instant."""
+        return {"origin": self.origin, "destination": self.destination, "route": self.route,
+                "month": self.month, "as_of": iso_utc(as_of)}
+
+
+def iso_utc(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def route_codes(row):
@@ -59,6 +69,24 @@ def classify(row, now, catalog):
 class Plan:
     items: tuple
     counts: dict
+
+
+def select_window(items, cap, as_of, period_minutes):
+    """Bounded, deterministic rotation: never the same items dropped on every run.
+
+    With n sorted items and a cap c < n, the items form w = ceil(n / c) consecutive windows. The
+    run number (as_of divided into schedule periods) picks window run % w, so w consecutive
+    scheduled runs check every item exactly once while the set is unchanged. Stateless: no
+    table, no new AWS resource. Assumes SCHEDULE_PERIOD_MINUTES matches the schedule.
+    """
+    n = len(items)
+    if n <= cap:
+        return items, {"windows": 1, "window": 0, "selected": n, "total": n}
+    windows = math.ceil(n / cap)
+    run = int(as_of.timestamp() // (period_minutes * 60))
+    w = run % windows
+    chosen = items[w * cap:(w + 1) * cap]
+    return chosen, {"windows": windows, "window": w, "selected": len(chosen), "total": n}
 
 
 def build(rows, now, catalog):

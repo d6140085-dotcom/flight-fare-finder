@@ -37,8 +37,8 @@ def fixture(name):
     return json.loads((FIX / name).read_text(encoding="utf-8"))
 
 
-def settings(**kw):
-    return config.Settings(**kw)
+def settings(dry_run=False, **kw):
+    return config.Settings(mode="dry_run" if dry_run else "live", **kw)
 
 
 def offer(price=8000, dep="2026-12-11T07:30:00+08:00", ret="2026-12-18T19:00:00+09:00", **extra):
@@ -97,7 +97,7 @@ class CatalogCodeTests(unittest.TestCase):
         self.assertEqual(plan.counts["active"], 285)
         c, t = client(lambda u, q: v3_body())
         for item in plan.items:
-            self.assertEqual(runner.parse_event(item.payload(), CATALOG, NOW), item)
+            self.assertEqual(runner.parse_event(item.payload(NOW), CATALOG, NOW), (item, NOW))
             c.fetch(item.origin, item.destination, item.month)
         self.assertEqual(len(t.calls), 285)
         self.assertTrue(all(call["query"]["one_way"] == "false" and call["query"]["currency"] == "twd"
@@ -212,7 +212,7 @@ class WorkItemTests(unittest.TestCase):
         kw = table.scan.call_args_list[0].kwargs
         self.assertNotIn("email", json.dumps(kw))
         self.assertEqual(set(kw["ExpressionAttributeNames"].values()),
-                         {"route", "origin", "destination", "departure_month", "alerts_paused"})
+                         {"route", "origin", "destination", "departure_month", "alerts_paused", "target_price"})
         self.assertEqual(table.scan.call_args_list[1].kwargs["ExclusiveStartKey"], {"k": 1})
 
 
@@ -410,8 +410,9 @@ class V1AdapterTests(unittest.TestCase):
 
     def test_m1_wrapper_payload_still_accepted(self):
         """The deployed M1 wrapper sends {origin, destination, route, plan} with no month."""
-        item = runner.parse_event({"origin": "TPE", "destination": "SEL", "route": "TPE-SEL", "plan": "seoul"}, CATALOG, NOW)
-        self.assertEqual(item, workitems.WorkItem("TPE", "SEL", "2026-12"))
+        item, as_of = runner.parse_event({"origin": "TPE", "destination": "SEL", "route": "TPE-SEL", "plan": "seoul"},
+                                         CATALOG, NOW)
+        self.assertEqual((item, as_of), (workitems.WorkItem("TPE", "SEL", "2026-12"), NOW))
 
 
 class CompatTests(unittest.TestCase):
@@ -451,153 +452,453 @@ class CompatTests(unittest.TestCase):
 # ---- matching -----------------------------------------------------------------------------
 
 class MatchingTests(unittest.TestCase):
+    ITEM = workitems.WorkItem("TPE", "TYO", "2026-12")
+
     def offer(self, price=8062):
         return tp.validate_offer(offer(price), origin="TPE", destination="TYO", month="2026-12", currency="twd",
                                  catalog=CATALOG, now=NOW, source="v3")[0]
 
     def test_fixture_rows(self):
-        rows = fixture("subscriptions.json")
-        bodies, skipped = matching.match(rows, workitems.WorkItem("TPE", "TYO", "2026-12"), self.offer(), None, NOW, CATALOG)
-        self.assertEqual(sorted(b["email"] for b in bodies), ["fixed-dec@example.com", "m1-tokyo@example.com"])
+        matched, skipped = matching.match(fixture("subscriptions.json"), self.ITEM, self.offer(), NOW, CATALOG)
+        self.assertEqual(sorted(r["email"] for r in matched), ["fixed-dec@example.com", "m1-tokyo@example.com"])
         self.assertEqual(skipped, {"other_route": 3, "other_month": 1, "paused": 1, "expired": 1, "invalid": 0,
                                    "no_target": 0, "above_target": 1})
 
+    def test_per_user_matching_after_one_shared_lookup(self):
+        """One lookup for TPE-TYO#2026-12; each user is then judged on their own target and month."""
+        rows = [row("a@example.com", "TPE-TYO", target_price=Decimal(9000)),
+                row("b@example.com", "TPE-TYO", target_price=Decimal(8000), departure_month="2026-12"),
+                row("c@example.com", "TPE-TYO", target_price=Decimal(8062), departure_month="2026-12"),
+                row("d@example.com", "TPE-TYO", target_price=Decimal(20000), departure_month="2027-01")]
+        matched, _ = matching.match(rows, self.ITEM, self.offer(), NOW, CATALOG)
+        self.assertEqual([r["email"] for r in matched], ["a@example.com", "c@example.com"])
+
     def test_message_shape_is_m1(self):
-        bodies, _ = matching.match([row("a@example.com", "TPE-TYO", plan_name="tokyo")],
-                                   workitems.WorkItem("TPE", "TYO", "2026-12"), self.offer(), self.offer(262), NOW, CATALOG)
-        b = bodies[0]
+        r = row("a@example.com", "TPE-TYO", plan_name="tokyo")
+        b = matching.message_body(r, self.ITEM, self.offer(), self.offer(262))
         self.assertEqual(list(b), ["email", "route", "plan_name", "target_price", "cheapest", "cheapest_usd"])
         self.assertEqual(list(b["cheapest"]), ["price", "currency", "airline", "depart_date", "return_date"])
         self.assertIsInstance(b["target_price"], int)
 
     def test_bad_targets_never_match(self):
         for tpv in (None, True, "abc", Decimal("NaN"), Decimal("-1"), 0):
-            bodies, skipped = matching.match([row("a@example.com", "TPE-TYO", target_price=tpv)],
-                                             workitems.WorkItem("TPE", "TYO", "2026-12"), self.offer(), None, NOW, CATALOG)
-            self.assertEqual((bodies, skipped["no_target"]), ([], 1), tpv)
+            matched, skipped = matching.match([row("a@example.com", "TPE-TYO", target_price=tpv)],
+                                              self.ITEM, self.offer(), NOW, CATALOG)
+            self.assertEqual((matched, skipped["no_target"]), ([], 1), tpv)
 
-    def test_target_equal_to_fare_matches(self):
-        bodies, _ = matching.match([row("a@example.com", "TPE-TYO", target_price=Decimal(8062))],
-                                   workitems.WorkItem("TPE", "TYO", "2026-12"), self.offer(), None, NOW, CATALOG)
-        self.assertEqual(len(bodies), 1)
+    def test_target_equal_to_fare_matches_and_rows_without_email_work(self):
+        r = {"route": "TPE-TYO", "target_price": Decimal(8062)}         # dry-run rows carry no email
+        matched, _ = matching.match([r], self.ITEM, self.offer(), NOW, CATALOG)
+        self.assertEqual(matched, [r])
 
 
-# ---- DRY_RUN safety -----------------------------------------------------------------------
+# ---- DRY_RUN safety (fail-closed) ---------------------------------------------------------
 
 def refuse(name):
     raise AssertionError(f"AWS client {name!r} created in DRY_RUN")
 
 
-class DryRunTests(unittest.TestCase):
-    def run_parser(self, event, st, logs):
-        rows = fixture("subscriptions.json")
-        return runner.run_parser(event, settings=st, catalog=CATALOG, token=TOKEN, reader=effects.ListReader(rows),
-                                 now=NOW, transport=Transport(lambda u, q: fixture("v3_tpe_tyo_2026-12_twd.json")
-                                                              if q["currency"] == "twd" else fixture("v3_tpe_tyo_2026-12_usd.json")),
-                                 client_factory=refuse, log=logs.append)
+class FakeTable:
+    """DynamoDB Table stand-in: honours ProjectionExpression and the route filter, records calls."""
+    def __init__(self, rows):
+        self.rows, self.calls = rows, []
 
-    def test_env_dry_run_creates_no_clients_and_logs_no_addresses_or_token(self):
-        logs = []
-        out = self.run_parser({"origin": "TPE", "destination": "TYO", "month": "2026-12"},
-                              settings(fare_api="v3", dry_run=True), logs)
-        self.assertTrue(out["dry_run"])
-        self.assertEqual(out["matched"], 2)
-        blob = json.dumps(out) + "\n".join(logs)
+    def scan(self, **kw):
+        self.calls.append(("scan", kw))
+        items = self.rows
+        if "FilterExpression" in kw:
+            items = [r for r in items if r.get("route") == kw["ExpressionAttributeValues"][":r"]]
+        if "ProjectionExpression" in kw:
+            fields = set(kw["ExpressionAttributeNames"].values())
+            items = [{k: v for k, v in r.items() if k in fields} for r in items]
+        return {"Items": items}
+
+    def __getattr__(self, name):          # any write method is recorded, then the test fails on it
+        def write(*a, **kw):
+            self.calls.append((name, kw))
+        return write
+
+
+class Aws:
+    """boto3 stand-in. `lambda` invoke runs the OLD M1 parser (simulated production) with a
+    recording SQS client, so any fan-out would visibly produce real notifications."""
+    def __init__(self, rows):
+        self.clients, self.resources, self.sqs_sent, self.m1_runs = [], [], [], []
+        self.table = FakeTable(rows)
+        self.module = types.ModuleType("boto3")
+        self.module.client = self.client
+        self.module.resource = self.resource
+
+    def client(self, name, *a, **kw):
+        self.clients.append(name)
+        m = mock.MagicMock(name=name)
+        if name == "ssm":
+            m.get_parameter.return_value = {"Parameter": {"Value": TOKEN}}
+        if name == "sqs":
+            m.send_message.side_effect = lambda **k: self.sqs_sent.append(k)
+        if name == "lambda":
+            m.invoke.side_effect = self.run_old_m1_parser
+        return m
+
+    def resource(self, name, *a, **kw):
+        self.resources.append(name)
+        r = mock.MagicMock()
+        r.Table.return_value = self.table
+        return r
+
+    def run_old_m1_parser(self, FunctionName, Payload, **kw):
+        m1 = load_m1_parser()
+        m1._token, m1._table = TOKEN, mock.MagicMock()
+        m1._table.scan.return_value = {"Items": self.table.rows}
+        m1._sqs = mock.MagicMock()
+        m1._sqs.send_message.side_effect = lambda **k: self.sqs_sent.append(k)
+        self.m1_runs.append(json.loads(Payload))
+        body = fixture("v1_tpe_tyo_2026-12_twd.json")
+        with mock.patch.object(m1.urllib.request, "urlopen", lambda req, timeout: io.BytesIO(json.dumps(body).encode())), \
+             mock.patch.dict("os.environ", {"FARE_QUEUE_URL": "https://sqs.example/q"}):
+            m1.handler(json.loads(Payload), None)
+
+
+class FixedNow(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return NOW
+
+
+def load_handlers(aws):
+    mods = {}
+    with mock.patch.dict(sys.modules, {"boto3": aws.module}):
+        for name in ("wrapper", "parser"):
+            spec = importlib.util.spec_from_file_location(f"fc_{name}", PKG / f"{name}.py")
+            mods[name] = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mods[name])
+            mods[name].datetime = FixedNow
+    return mods
+
+
+def fixture_urlopen(req, timeout):
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(req.full_url).query))
+    api = "v3" if "v3" in req.full_url else "v1"
+    month = q.get("depart_date") or q.get("departure_at")
+    path = FIX / f"{api}_{q['origin']}_{q['destination']}_{month}_{q['currency']}.json".lower()
+    if not path.exists():
+        raise OSError("no fixture")
+    return io.BytesIO(path.read_bytes())
+
+
+class DryRunSafetyTests(unittest.TestCase):
+    ROWS = fixture("subscriptions.json")
+
+    def run_handler(self, name, env, event=None):
+        aws = Aws(self.ROWS)
+        mods = load_handlers(aws)
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch("urllib.request.urlopen", fixture_urlopen):
+            try:
+                result, error = mods[name].handler(event or {}, None), None
+            except Exception as e:  # noqa: BLE001 - the test inspects it
+                result, error = None, e
+        return aws, result, error
+
+    def assert_no_production_effects(self, aws):
+        self.assertNotIn("lambda", aws.clients, "a Lambda client was created")
+        self.assertNotIn("sqs", aws.clients, "an SQS client was created")
+        self.assertNotIn("ses", aws.clients)
+        self.assertEqual(aws.m1_runs, [], "the production parser was invoked")
+        self.assertEqual(aws.sqs_sent, [], "an SQS message was sent")
+        self.assertTrue(all(c[0] == "scan" for c in aws.table.calls), aws.table.calls)
+
+    # 1. new scheduler + old production parser
+    def test_new_scheduler_in_dry_run_never_reaches_the_old_m1_parser(self):
+        aws, out, err = self.run_handler("wrapper", {"FARECHECK_MODE": "dry_run", "FARE_API": "v3"})
+        self.assertIsNone(err)
+        self.assert_no_production_effects(aws)
+        self.assertEqual(aws.clients, ["ssm"])                 # token only
+        report = {r["key"]: r for r in out["dry_run_report"]}
+        self.assertEqual(report["TPE-TYO#2026-12"]["would_alert"], 2)   # matches exist, nothing is sent
+        self.assertEqual(report["TPE-TYO#2026-12"]["would_alert_targets"], [8100, 9000])
+        blob = json.dumps(out)
         self.assertNotIn("@", blob)
         self.assertNotIn(TOKEN, blob)
 
-    def test_payload_can_turn_dry_run_on_but_never_off(self):
-        logs = []
-        out = self.run_parser({"origin": "TPE", "destination": "TYO", "month": "2026-12", "dry_run": True},
-                              settings(fare_api="v3", dry_run=False), logs)
-        self.assertTrue(out["dry_run"])
-        out = self.run_parser({"origin": "TPE", "destination": "TYO", "month": "2026-12", "dry_run": False},
-                              settings(fare_api="v3", dry_run=True), logs)
-        self.assertTrue(out["dry_run"])
+    def test_harness_is_live_the_same_old_parser_does_send_in_live_mode(self):
+        """Control: in live mode the stand-in old parser really produces SQS messages, so the dry-run
+        test above would have caught a fan-out."""
+        aws, out, err = self.run_handler("wrapper", {"FARECHECK_MODE": "live"})
+        self.assertIsNone(err)
+        self.assertEqual(len(aws.m1_runs), 5)
+        self.assertGreater(len(aws.sqs_sent), 0)
 
-    def test_live_publisher_refused_in_dry_run(self):
+    def test_dry_run_scan_never_returns_email(self):
+        aws, out, err = self.run_handler("wrapper", {"FARECHECK_MODE": "dry_run"})
+        self.assertIsNone(err)
+        kinds = [c[1] for c in aws.table.calls]
+        self.assertEqual(len(kinds), 1)
+        self.assertNotIn("email", kinds[0]["ExpressionAttributeNames"].values())
+
+    # 2. missing configuration, 3. conflicting configuration
+    def test_missing_or_conflicting_mode_refuses_before_any_client(self):
+        bad_envs = [{}, {"DRY_RUN": "1"}, {"DRY_RUN": "0"}, {"FARECHECK_MODE": ""}, {"FARECHECK_MODE": "maybe"},
+                    {"FARECHECK_MODE": "live", "DRY_RUN": "1"}, {"FARECHECK_MODE": "live", "DRY_RUN": "true"},
+                    {"FARECHECK_MODE": "dry_run", "DRY_RUN": "0"}, {"FARECHECK_MODE": "dry_run", "DRY_RUN": "false"}]
+        for env in bad_envs:
+            for name in ("wrapper", "parser"):
+                aws, out, err = self.run_handler(name, env, {"origin": "TPE", "destination": "TYO", "month": "2026-12"})
+                self.assertIsInstance(err, config.ConfigError, (name, env))
+                self.assertEqual((aws.clients, aws.resources, aws.table.calls), ([], [], []), (name, env))
+
+    def test_consistent_configurations_are_accepted(self):
+        for env, mode in (({"FARECHECK_MODE": "dry_run"}, "dry_run"), ({"FARECHECK_MODE": "DRY_RUN", "DRY_RUN": "1"}, "dry_run"),
+                          ({"FARECHECK_MODE": "live"}, "live"), ({"FARECHECK_MODE": "live", "DRY_RUN": "0"}, "live")):
+            self.assertEqual(config.Settings.from_env(env).mode, mode)
+        self.assertTrue(config.Settings().dry_run)              # code default is dry, never live
+
+    # 4. downstream Lambda
+    def test_dry_run_cannot_build_any_downstream_invoker(self):
+        with self.assertRaises(effects.DryRunViolation):
+            effects.LambdaInvoker("flight-parser", refuse, dry_run=True)
+        with self.assertRaises(effects.DryRunViolation):
+            effects.guarded_factory(refuse, {"ssm"})("lambda")
+        with self.assertRaises(effects.DryRunViolation):
+            runner.run_wrapper(settings=settings(dry_run=True), catalog=CATALOG, reader=effects.ListReader(self.ROWS),
+                               now=NOW, invoker=effects.RecordingInvoker(), dry_evaluator=lambda i, r: {})
+        live = effects.LambdaInvoker("flight-parser", refuse, dry_run=False)
+        with self.assertRaises(effects.DryRunViolation):
+            live.invoke({"origin": "TPE", "dry_run": True})
+
+    def test_dry_run_fails_closed_when_its_components_are_missing(self):
+        with self.assertRaises(effects.DryRunViolation):          # no evaluator: refuse, never fall back to live
+            runner.run_wrapper(settings=settings(dry_run=True), catalog=CATALOG,
+                               reader=effects.ListReader(self.ROWS), now=NOW)
+        with self.assertRaises(effects.DryRunViolation):
+            runner.DryRunEvaluator(settings=settings(), catalog=CATALOG, client=None, as_of=NOW)
+        aws = Aws(self.ROWS)                                         # token unavailable: error, nothing else
+        aws.module.client = lambda name, *a, **k: (aws.clients.append(name), (_ for _ in ()).throw(RuntimeError("ssm down")))[1]
+        mods = load_handlers(aws)
+        with mock.patch.dict("os.environ", {"FARECHECK_MODE": "dry_run"}, clear=True):
+            with self.assertRaises(RuntimeError):
+                mods["wrapper"].handler({}, None)
+        self.assert_no_production_effects(aws)
+
+    # 5. SQS
+    def test_dry_run_cannot_connect_to_sqs(self):
         with self.assertRaises(effects.DryRunViolation):
             effects.SqsPublisher("https://sqs.example/q", refuse, dry_run=True)
-        inv = effects.LambdaInvoker("flight-parser", refuse, dry_run_payloads=True)
         with self.assertRaises(effects.DryRunViolation):
-            inv.invoke({"origin": "TPE", "destination": "TYO"})
+            effects.guarded_factory(refuse, {"ssm"})("sqs")
+        for env, event in (({"FARECHECK_MODE": "dry_run", "FARE_API": "v3"}, {}),
+                           ({"FARECHECK_MODE": "live", "FARE_API": "v3", "FARE_QUEUE_URL": "https://sqs.example/q"},
+                            {"dry_run": True})):
+            ev = dict({"origin": "TPE", "destination": "TYO", "month": "2026-12"}, **event)
+            aws, out, err = self.run_handler("parser", env, ev)
+            self.assertIsNone(err)
+            self.assertTrue(out["dry_run"])
+            self.assertEqual(out["matched"], 2)
+            self.assert_no_production_effects(aws)
 
-    def test_wrapper_dry_run_marks_every_payload(self):
-        inv = effects.RecordingInvoker()
-        out = runner.run_wrapper(settings=settings(dry_run=True), catalog=CATALOG,
-                                 reader=effects.ListReader(fixture("subscriptions.json")), invoker=inv, now=NOW,
-                                 log=lambda m: None)
-        self.assertEqual(len(inv.payloads), 5)
-        self.assertTrue(all(p["dry_run"] is True for p in inv.payloads))
+    def test_parser_client_guard_alone_blocks_sqs_in_dry_run(self):
+        """Second layer: even if the publisher logic were wrong, the parser's client factory refuses SQS."""
+        seen = {}
+
+        def probe(event, *, client_factory, **kw):
+            for name in ("sqs", "lambda", "ses"):
+                try:
+                    client_factory(name)
+                    seen[name] = "created"
+                except effects.DryRunViolation:
+                    seen[name] = "refused"
+            return {"ok": True}
+
+        aws = Aws(self.ROWS)
+        mods = load_handlers(aws)
+        for env, event in (({"FARECHECK_MODE": "dry_run"}, {}), ({"FARECHECK_MODE": "live"}, {"dry_run": True})):
+            seen.clear()
+            with mock.patch.dict("os.environ", env, clear=True), mock.patch.object(mods["parser"].runner, "run_parser", probe):
+                mods["parser"]._token = None
+                mods["parser"].handler(dict({"origin": "TPE", "destination": "TYO"}, **event), None)
+            self.assertEqual(seen, {"sqs": "refused", "lambda": "refused", "ses": "refused"}, env)
+        self.assert_no_production_effects(aws)
+
+    def test_payload_can_turn_dry_run_on_but_never_off(self):
+        aws, out, err = self.run_handler("parser", {"FARECHECK_MODE": "dry_run", "FARE_API": "v3"},
+                                         {"origin": "TPE", "destination": "TYO", "month": "2026-12", "dry_run": False})
         self.assertTrue(out["dry_run"])
-        self.assertNotIn("@", json.dumps(inv.payloads))
+        self.assert_no_production_effects(aws)
 
-    def test_dry_run_flag_parsing_fails_safe(self):
-        for raw, expect in (("1", True), ("true", True), ("yes", True), ("maybe", True), ("0", False),
-                            ("false", False), ("No", False), ("", False), (None, False)):
-            env = {} if raw is None else {"DRY_RUN": raw}
-            self.assertEqual(config.Settings.from_env(env).dry_run, expect, raw)
-        with self.assertRaises(ValueError):
-            config.Settings.from_env({"FARE_API": "v2"})
+    # 6. DynamoDB writes
+    def test_subscriptions_table_is_read_only_in_every_mode(self):
+        t = effects.ReadOnlyTable(FakeTable([]))
+        for method in ("put_item", "update_item", "delete_item", "batch_writer", "transact_write_items", "delete"):
+            with self.assertRaises(effects.ReadOnlyViolation, msg=method):
+                getattr(t, method)
+        self.assertEqual(t.scan(), {"Items": []})
+        for env in ({"FARECHECK_MODE": "dry_run"}, {"FARECHECK_MODE": "live"}):
+            aws, _, err = self.run_handler("wrapper", env)
+            self.assertIsNone(err)
+            self.assertTrue(all(c[0] == "scan" for c in aws.table.calls))
 
-    def _handler_modules(self, env):
-        boto3 = types.ModuleType("boto3")
-        created = []
+    def test_live_parser_is_the_only_path_that_sends(self):
+        """Live parser (control): SQS is reachable only here, and only with an explicit live mode."""
+        aws, out, err = self.run_handler("parser", {"FARECHECK_MODE": "live", "FARE_API": "v3",
+                                                    "FARE_QUEUE_URL": "https://sqs.example/q"},
+                                         {"origin": "TPE", "destination": "TYO", "month": "2026-12",
+                                          "as_of": "2026-11-06T13:00:00Z"})
+        self.assertIsNone(err)
+        self.assertEqual(len(aws.sqs_sent), 2)
+        self.assertEqual(sorted(aws.clients), ["sqs", "ssm"])
 
-        def client(name, *a, **kw):
-            created.append(name)
-            m = mock.MagicMock(name=name)
-            if name == "ssm":
-                m.get_parameter.return_value = {"Parameter": {"Value": TOKEN}}
-            return m
 
-        table = mock.MagicMock()
-        table.scan.return_value = {"Items": fixture("subscriptions.json")}
-        resource = mock.MagicMock()
-        resource.return_value.Table.return_value = table
-        boto3.client, boto3.resource = client, resource
-        mods = {}
-        with mock.patch.dict(sys.modules, {"boto3": boto3}), mock.patch.dict("os.environ", env, clear=False):
-            for name in ("wrapper", "parser"):
-                spec = importlib.util.spec_from_file_location(f"fc_{name}", PKG / f"{name}.py")
-                mods[name] = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mods[name])
-        return mods, created, table
+# ---- month boundary (Asia/Taipei) ----------------------------------------------------------
 
-    def test_handlers_in_dry_run_never_touch_sqs_notification_or_writes(self):
-        env = {"DRY_RUN": "1", "FARE_API": "v3", "FARE_QUEUE_URL": "https://sqs.example/q"}
-        mods, created, table = self._handler_modules(env)
-        answers = lambda req, timeout: io.BytesIO(json.dumps(
-            fixture("v3_tpe_tyo_2026-12_twd.json")).encode())
-        class FixedNow(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return NOW
+BEFORE = datetime(2026, 11, 30, 15, 59, 59, tzinfo=timezone.utc)   # 2026-11-30 23:59:59 Taipei
+AFTER = datetime(2026, 11, 30, 16, 0, 1, tzinfo=timezone.utc)      # 2026-12-01 00:00:01 Taipei
+BOUNDARY_ROWS = [
+    {"email": "rolling@example.com", "route": "TPE-TYO", "target_price": Decimal(20000)},
+    {"email": "nov@example.com", "route": "TPE-TYO", "departure_month": "2026-11", "target_price": Decimal(20000)},
+    {"email": "dec@example.com", "route": "TPE-TYO", "departure_month": "2026-12", "target_price": Decimal(20000)},
+    {"email": "jan@example.com", "route": "TPE-TYO", "departure_month": "2027-01", "target_price": Decimal(20000)},
+]
 
-        with mock.patch.dict("os.environ", env), \
-             mock.patch("urllib.request.urlopen", answers), \
-             mock.patch.object(mods["parser"], "datetime", FixedNow), \
-             mock.patch.object(mods["wrapper"], "datetime", FixedNow):
-            w = mods["wrapper"].handler({}, None)
-            p = mods["parser"].handler({"origin": "TPE", "destination": "TYO", "month": "2026-12", "dry_run": True}, None)
-        self.assertTrue(w["dry_run"] and p["dry_run"])
-        self.assertNotIn("sqs", created)
-        self.assertEqual(set(created), {"lambda", "ssm"})   # parser fan-out (dry-run payloads) + token
-        for call in table.method_calls:
-            self.assertEqual(call[0], "scan")              # reads only: no put/update/delete/batch writes
 
-    def test_wrapper_handler_invokes_only_the_parser(self):
-        env = {"DRY_RUN": "1"}
-        mods, created, _ = self._handler_modules(env)
-        sent = []
-        with mock.patch.dict("os.environ", env):
-            inv_client = mock.MagicMock()
-            inv_client.invoke.side_effect = lambda **kw: sent.append(kw)
-            with mock.patch.object(mods["wrapper"].boto3, "client", lambda name: inv_client):
-                mods["wrapper"].handler({}, None)
-        self.assertTrue(sent)
-        self.assertEqual({s["FunctionName"] for s in sent}, {"flight-parser"})
-        self.assertTrue(all(json.loads(s["Payload"])["dry_run"] is True for s in sent))
+def dec_offer_body(u, q):
+    m = q.get("departure_at") or q.get("depart_date")
+    d = {"2026-12": ("2026-12-11T07:30:00+08:00", "2026-12-18T19:00:00+09:00"),
+         "2027-01": ("2027-01-11T07:30:00+08:00", "2027-01-18T19:00:00+09:00"),
+         "2026-11": ("2026-11-12T07:30:00+08:00", "2026-11-18T19:00:00+09:00")}[m]
+    return v3_body(offer(8000, dep=d[0], ret=d[1]), currency=q["currency"])
+
+
+class MonthBoundaryTests(unittest.TestCase):
+    def plan(self, at):
+        return [i.key for i in workitems.build(BOUNDARY_ROWS, at, CATALOG).items]
+
+    def test_2026_11_30_235959_taipei(self):
+        self.assertEqual(self.plan(BEFORE), ["TPE-TYO#2026-11", "TPE-TYO#2026-12", "TPE-TYO#2027-01"])
+
+    def test_2026_12_01_000001_taipei(self):
+        # rolling moves to 2027-01 (merged with the fixed January row); November has expired
+        self.assertEqual(self.plan(AFTER), ["TPE-TYO#2026-12", "TPE-TYO#2027-01"])
+
+    def run_parser_at(self, payload, now):
+        return runner.run_parser(payload, settings=settings(fare_api="v3", dry_run=True, fetch_usd=False), catalog=CATALOG,
+                                 token=TOKEN, reader=effects.ListReader(BOUNDARY_ROWS), now=now,
+                                 transport=Transport(dec_offer_body), log=lambda m: None)
+
+    def test_scheduler_run_crossing_midnight_keeps_the_wrapper_month(self):
+        """Wrapper at 23:59:59, parser at 00:00:01: the rolling row still matches December."""
+        inv = effects.RecordingInvoker()
+        runner.run_wrapper(settings=settings(), catalog=CATALOG, reader=effects.ListReader(BOUNDARY_ROWS), now=BEFORE,
+                           invoker=inv, log=lambda m: None)
+        dec = next(p for p in inv.payloads if p["month"] == "2026-12")
+        self.assertEqual(dec["as_of"], "2026-11-30T15:59:59Z")
+        out = self.run_parser_at(dec, AFTER)
+        self.assertEqual(out["matched"], 2)          # rolling + fixed December, resolved at as_of
+        self.assertEqual(out["as_of"], "2026-11-30T15:59:59Z")
+
+    def test_without_as_of_the_race_would_skip_the_rolling_row(self):
+        """Documents the bug the as_of fixes: the parser's own clock says the rolling row is January."""
+        out = self.run_parser_at({"origin": "TPE", "destination": "TYO", "month": "2026-12"}, AFTER)
+        self.assertEqual(out["matched"], 1)                 # only the fixed December row
+        self.assertEqual(out["skipped"]["other_month"], 2)  # the rolling row (now January) and January
+
+    def test_november_item_after_midnight_alerts_nobody(self):
+        inv = effects.RecordingInvoker()
+        runner.run_wrapper(settings=settings(), catalog=CATALOG, reader=effects.ListReader(BOUNDARY_ROWS), now=BEFORE,
+                           invoker=inv, log=lambda m: None)
+        nov = next(p for p in inv.payloads if p["month"] == "2026-11")
+        out = self.run_parser_at(nov, AFTER)          # every November departure has now passed
+        self.assertEqual((out["fare_check"]["kind"], out["matched"]), ("no_data", 0))
+
+    def test_in_process_dry_run_uses_one_as_of(self):
+        t = Transport(dec_offer_body)
+        late_client = tp.Client(TOKEN, CATALOG, AFTER, api="v3", transport=t, log=lambda m: None)
+        ev = runner.DryRunEvaluator(settings=settings(dry_run=True, fetch_usd=False), catalog=CATALOG,
+                                    client=late_client, as_of=BEFORE, log=lambda m: None)
+        out = runner.run_wrapper(settings=settings(dry_run=True), catalog=CATALOG,
+                                 reader=effects.ListReader(BOUNDARY_ROWS), now=BEFORE, dry_evaluator=ev, log=lambda m: None)
+        dec = next(r for r in out["dry_run_report"] if r["key"] == "TPE-TYO#2026-12")
+        self.assertEqual(dec["would_alert"], 2)
+
+    def test_consecutive_runs_check_each_month_once_without_gaps(self):
+        months_checked = []
+        for at in (BEFORE - timedelta(minutes=30), BEFORE, AFTER, AFTER + timedelta(minutes=30)):
+            inv = effects.RecordingInvoker()
+            runner.run_wrapper(settings=settings(), catalog=CATALOG, reader=effects.ListReader(BOUNDARY_ROWS[:1]),
+                               now=at, invoker=inv, log=lambda m: None)
+            self.assertEqual(len(inv.payloads), 1)    # never two months for one rolling row in one run
+            months_checked.append(inv.payloads[0]["month"])
+        self.assertEqual(months_checked, ["2026-12", "2026-12", "2027-01", "2027-01"])
+
+    def test_as_of_is_validated(self):
+        base = {"origin": "TPE", "destination": "TYO", "month": "2026-12"}
+        for bad in ("2026-11-06 13:00:00", "yesterday", 12345, "2026-11-04T12:00:00Z", "2026-11-06T13:30:00Z"):
+            with self.assertRaises(ValueError, msg=bad):
+                runner.parse_event(dict(base, as_of=bad), CATALOG, NOW)
+        with self.assertRaises(ValueError):          # month already over at as_of
+            runner.parse_event(dict(base, month="2026-10", as_of="2026-11-06T12:00:00Z"), CATALOG, NOW)
+        item, as_of = runner.parse_event(dict(base, as_of="2026-11-06T12:00:00Z"), CATALOG, NOW)
+        self.assertEqual(as_of, NOW - timedelta(hours=1))
+
+
+# ---- bounded rotation (no starvation) -----------------------------------------------------
+
+def many_rows(n_routes_months):
+    months_ = ["2027-01", "2027-02", "2027-03", "2027-04", "2027-05"]
+    combos = [(o, d, m) for m in months_ for o in ORIGINS for d in DESTS][:n_routes_months]
+    return [{"route": f"{o}-{d}", "departure_month": m, "target_price": 9000} for o, d, m in combos]
+
+
+class RotationTests(unittest.TestCase):
+    def run_at(self, rows, at, **kw):
+        inv = effects.RecordingInvoker()
+        out = runner.run_wrapper(settings=settings(**kw), catalog=CATALOG, reader=effects.ListReader(rows), now=at,
+                                 invoker=inv, log=lambda m: None)
+        return [p["route"] + "#" + p["month"] for p in inv.payloads], out
+
+    def test_1200_items_cap_500_every_item_within_three_scheduled_runs(self):
+        rows = many_rows(1200)
+        all_keys = {i.key for i in workitems.build(rows, NOW, CATALOG).items}
+        self.assertEqual(len(all_keys), 1200)
+        seen, runs = [], []
+        for k in range(3):
+            keys, out = self.run_at(rows, NOW + timedelta(minutes=30 * k))
+            self.assertLessEqual(len(keys), 500)
+            self.assertEqual(out["window"]["windows"], 3)
+            runs.append(set(keys))
+            seen.extend(keys)
+        self.assertEqual(set(seen), all_keys)
+        self.assertEqual(len(seen), len(set(seen)))   # no item twice within the cycle
+        self.assertNotEqual(runs[0], runs[1])
+
+    def test_window_sizes_and_cycle_repeat(self):
+        rows = many_rows(1425)                         # 3 origins x 95 destinations x 5 months
+        sizes = [len(self.run_at(rows, NOW + timedelta(minutes=30 * k))[0]) for k in range(6)]
+        self.assertEqual(sorted(sizes[:3]), [425, 500, 500])
+        self.assertEqual(self.run_at(rows, NOW)[0], self.run_at(rows, NOW + timedelta(minutes=90))[0])
+
+    def test_any_start_time_covers_everything_in_consecutive_runs(self):
+        rows = many_rows(1001)
+        all_keys = {i.key for i in workitems.build(rows, NOW, CATALOG).items}
+        for start in range(0, 24 * 60, 37):
+            t0 = NOW + timedelta(minutes=start)
+            seen = set()
+            for k in range(3):
+                seen |= set(self.run_at(rows, t0 + timedelta(minutes=30 * k))[0])
+            self.assertEqual(seen, all_keys, start)
+
+    def test_dry_run_cap_rotates_too(self):
+        rows = many_rows(120)
+        ev = lambda item, r: {"key": item.key}
+        seen = []
+        for k in range(3):
+            out = runner.run_wrapper(settings=settings(dry_run=True), catalog=CATALOG, reader=effects.ListReader(rows),
+                                     now=NOW + timedelta(minutes=30 * k), dry_evaluator=ev, log=lambda m: None)
+            self.assertLessEqual(len(out["dry_run_report"]), 50)
+            seen += [r["key"] for r in out["dry_run_report"]]
+        self.assertEqual(len(set(seen)), 120)
+
+    def test_under_cap_everything_every_run(self):
+        keys, out = self.run_at(many_rows(40), NOW)
+        self.assertEqual((len(keys), out["window"]["windows"]), (40, 1))
 
 
 # ---- duplicate requests and status -------------------------------------------------------
@@ -637,8 +938,9 @@ class RequestCountTests(unittest.TestCase):
         inv, logs = effects.RecordingInvoker(), []
         runner.run_wrapper(settings=settings(max_work_items=4), catalog=CATALOG, reader=effects.ListReader(rows),
                            invoker=inv, now=NOW, log=logs.append)
-        self.assertEqual(len(inv.payloads), 4)
+        self.assertIn(len(inv.payloads), (4, 2))       # windows of 4, 4, 2
         self.assertIn("WARNING", logs[0])
+        self.assertIn("checked once per 3 scheduled runs", logs[0])
 
 
 class StatusTests(unittest.TestCase):

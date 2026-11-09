@@ -1,25 +1,56 @@
-"""Every side effect of the fare check goes through these classes, so DRY_RUN is enforced in
-one place: in dry-run mode no SQS client, Lambda client or DynamoDB write is ever created.
+"""Every side effect of the fare check goes through these classes, so the safety rules are
+enforced in one place:
 
-Reads: the wrapper scans `subscriptions` without `email`; the parser reads one route's rows.
-Writes: only SQS `send_message` (live mode). The fare check never writes DynamoDB.
+- AWS clients come only from `guarded_factory`, which allows an explicit set of services.
+  Dry run allows `ssm` (the Travelpayouts token) and nothing else: no Lambda, SQS or SES client
+  can be created, so no parser, queue, notification Lambda or email can be reached.
+- `subscriptions` is only ever seen through `ReadOnlyTable`, which exposes `scan` and refuses
+  every write method, in both modes. The fare check never writes DynamoDB.
+- `LambdaInvoker` (the live fan-out) refuses to exist in dry run.
 """
 import hashlib
 import json
 
 
 class DryRunViolation(RuntimeError):
-    """A live side effect was attempted while DRY_RUN is on."""
+    """A live side effect was attempted while in dry run."""
+
+
+class ReadOnlyViolation(RuntimeError):
+    """A DynamoDB write was attempted; the fare check is read-only."""
 
 
 def subscriber_tag(email):
     return "sub:" + hashlib.sha256(email.encode()).hexdigest()[:8]
 
 
+def guarded_factory(factory, allowed):
+    """Wrap boto3.client so only the named services can be created."""
+    allowed = frozenset(allowed)
+
+    def create(service, *args, **kwargs):
+        if service not in allowed:
+            raise DryRunViolation(f"AWS client {service!r} is not allowed here (allowed: {sorted(allowed)})")
+        return factory(service, *args, **kwargs)
+    return create
+
+
+class ReadOnlyTable:
+    """Proxy for a DynamoDB Table resource that only allows scan."""
+    def __init__(self, table):
+        self._table = table
+
+    def scan(self, **kwargs):
+        return self._table.scan(**kwargs)
+
+    def __getattr__(self, name):
+        raise ReadOnlyViolation(f"subscriptions.{name} is not allowed: the fare check is read-only")
+
+
 class SqsPublisher:
     def __init__(self, queue_url, client_factory, dry_run):
         if dry_run:
-            raise DryRunViolation("SQS publisher requested in DRY_RUN")
+            raise DryRunViolation("SQS publisher requested in dry run")
         if not queue_url:
             raise ValueError("FARE_QUEUE_URL is not set")
         self.queue_url, self._client, self._factory = queue_url, None, client_factory
@@ -42,13 +73,15 @@ class DryRunPublisher:
 
 
 class LambdaInvoker:
-    def __init__(self, function_name, client_factory, dry_run_payloads):
+    """Live fan-out to the parser. Cannot be constructed in dry run."""
+    def __init__(self, function_name, client_factory, dry_run):
+        if dry_run:
+            raise DryRunViolation("parser fan-out requested in dry run")
         self.function_name, self._factory, self._client = function_name, client_factory, None
-        self.dry_run_payloads = dry_run_payloads
 
     def invoke(self, payload):
-        if self.dry_run_payloads and payload.get("dry_run") is not True:
-            raise DryRunViolation("live parser payload in DRY_RUN")
+        if payload.get("dry_run"):
+            raise DryRunViolation("dry-run payload on the live fan-out")
         if self._client is None:
             self._client = self._factory("lambda")
         self._client.invoke(FunctionName=self.function_name, InvocationType="Event",
@@ -65,11 +98,11 @@ class RecordingInvoker:
 
 
 class TableReader:
-    """Read-only scans of `subscriptions` (resource injected so tests never touch AWS)."""
-    WRAPPER_FIELDS = ("route", "origin", "destination", "departure_month", "alerts_paused")
+    """Read-only scans of `subscriptions`. The wrapper's scan never includes `email`."""
+    WRAPPER_FIELDS = ("route", "origin", "destination", "departure_month", "alerts_paused", "target_price")
 
     def __init__(self, table):
-        self.table = table
+        self.table = table if isinstance(table, ReadOnlyTable) else ReadOnlyTable(table)
 
     def _scan(self, **kw):
         while True:
@@ -98,3 +131,16 @@ class ListReader:
 
     def rows_for_route(self, route):
         return (r for r in self.rows if r.get("route") == route)
+
+
+def get_token(name, client_factory):
+    """SSM value: a bare token or {"token": ...}. Never logged or returned to callers' output."""
+    raw = client_factory("ssm").get_parameter(Name=name, WithDecryption=True)["Parameter"]["Value"].strip()
+    try:
+        v = json.loads(raw)
+    except ValueError:
+        v = raw
+    token = v.get("token") if isinstance(v, dict) else str(v)
+    if not token:
+        raise RuntimeError("Travelpayouts parameter has no token")
+    return token
