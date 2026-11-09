@@ -4,11 +4,34 @@
 import { effectiveMonth, monthLabel } from "./months";
 import { statusOf, type RouteSubscription } from "./subscriptions";
 
-/** Result of the latest fare check for a subscription's (origin, destination, effective month). */
+/**
+ * Result of the latest fare check for a subscription's (origin, destination, effective month).
+ * Shape of `fare_check` in the subscriptions API (contract §3.4), produced by the Phase 2A fare
+ * check (`aws/lambdas/flight-fare-check/farecheck/status.py`). The itinerary fields are optional
+ * so older records and the prototype's demo data stay valid; Phase 3 shows search links only when
+ * both dates are present (docs/m1.4-multi-platform-search-links.md §2.2).
+ */
 export type FareCheck =
-  | { kind: "ok"; cheapest_twd: number; checked_at: string }
+  | {
+      kind: "ok";
+      cheapest_twd: number;
+      checked_at: string;
+      /** Always "TWD": the fare check never accepts another currency. */
+      currency?: "TWD";
+      /** YYYY-MM-DD, local date of the outbound flight. */
+      depart_date?: string;
+      /** YYYY-MM-DD, local date of the return flight (fares are always round trips). */
+      return_date?: string;
+      /** Actual airports when Travelpayouts reports them (v3), e.g. TSA for a TPE search. */
+      origin_airport?: string | null;
+      destination_airport?: string | null;
+    }
   | { kind: "no_data"; checked_at: string }
   | { kind: "error"; checked_at: string };
+
+/** True when an ok result carries a complete round-trip itinerary (needed for search links). */
+export const hasItinerary = (check: FareCheck | null): boolean =>
+  check?.kind === "ok" && Boolean(check.depart_date && check.return_date);
 
 export type FareDisplayKind = "expired" | "paused" | "ok" | "no_data" | "error" | "pending";
 

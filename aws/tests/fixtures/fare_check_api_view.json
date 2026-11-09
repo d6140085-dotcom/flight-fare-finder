@@ -1,0 +1,6 @@
+{
+  "_comment": "fare_check as the subscriptions API will return it (contract §3.4). Generated from the v3 fixture by farecheck.status.api_view; shared by the Python and TypeScript tests.",
+  "ok": {"kind": "ok", "checked_at": "2026-11-06T13:00:00Z", "cheapest_twd": 8062, "currency": "TWD", "depart_date": "2026-12-11", "return_date": "2026-12-18", "origin_airport": "TSA", "destination_airport": "HND"},
+  "no_data": {"kind": "no_data", "checked_at": "2026-11-06T13:00:00Z"},
+  "error": {"kind": "error", "checked_at": "2026-11-06T13:00:00Z"}
+}
