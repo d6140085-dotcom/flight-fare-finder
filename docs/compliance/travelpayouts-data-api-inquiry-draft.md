@@ -1,59 +1,25 @@
-# Draft inquiry to Travelpayouts support (B6) — for owner review, NOT sent
+# Travelpayouts Data API inquiry — ANSWERED (do not send)
 
-Purpose: close item 1 of [search links spec §8.4](../m1.4-multi-platform-search-links.md).
-The owner sends it from their own Travelpayouts account (support chat or ticket) after review.
-Fill in the bracketed parts; don't add the API token or any personal data.
+**Status: answered in writing by Travelpayouts Support on 2026-11-07.** This draft was prepared
+on 2026-11-06 for owner review; the owner contacted Travelpayouts separately. **Do not send
+another inquiry.**
 
----
+The answer grants permission with conditions. The conditions, and how the project applies them,
+are recorded in the [search links spec §8.5](../m1.4-multi-platform-search-links.md#85-travelpayouts-written-permission-received-2026-11-07):
 
-**Subject:** Data API — displaying reference fares alongside ordinary search links to other sites
+- reference fares may appear alongside ordinary search links to Skyscanner, Trip.com and Google
+  Flights, which may be the primary buttons;
+- a clearly labelled Aviasales affiliate link must remain available;
+- Aviasales must be identified as the source of the reference fare;
+- website and email use, periodic checks, subscriber alerts and cached storage are permitted;
+  refreshing the local cache about every 24 hours is recommended;
+- v3 `prices_for_dates` allows up to 600 requests per minute;
+- Traditional Chinese is permitted; prices converted to TWD must be labelled approximate.
 
-Hello Travelpayouts team,
+The original correspondence (ticket reference, names, account details) is kept by the owner and
+is intentionally not stored in this public repository.
 
-I run a small fare alert service for users in Taiwan ([project name / site URL]). Users subscribe to a route and departure month. We email them when
-the cached fare we receive is at or below their target price.
-
-**How we use your data today**
-
-- We use only the **Aviasales Data API**: `/v1/prices/cheap`, moving to
-  `/aviasales/v3/prices_for_dates`. We call it with our own token and cache results as you
-  recommend.
-- We do **not** use the Search API, and we do not combine your data with any other fare or
-  metasearch API.
-- Every price is labelled as a reference fare from Travelpayouts, for example: "Reference fare
-  detected: NT$8,062 (source: Travelpayouts). Prices may have changed; the final price is shown
-  on the booking site."
-- The email always keeps a link to the itinerary on Aviasales.
-
-**What we would like to add**
-
-Next to the Aviasales link, we would like to offer ordinary public search links. These would
-open the same route and dates on Skyscanner, Trip.com and Google Flights, so users can compare
-on sites with a Traditional Chinese interface. These links:
-
-- are plain links to each site's public search page, with no third-party affiliate or tracking
-  parameters (we have none issued);
-- never call those sites' APIs, and never send them our data;
-- never state that the Travelpayouts fare is available on those sites.
-
-**Questions**
-
-1. Under the Travelpayouts Affiliate Agreement and the Data API terms, may we show Data API
-   reference fares on the same email or page as these ordinary search links to Skyscanner,
-   Trip.com and Google Flights?
-2. If yes, are there conditions? For example, must the Aviasales link come first, or be the
-   most prominent? Is specific attribution wording required? Are there limits on email use?
-3. If not, which parts are not allowed? Is there an approved alternative? For example, would
-   Trip.com links be acceptable through the Trip.com programme on Travelpayouts?
-4. Is there anything else in how we use the Data API (described above) that we should change?
-
-Thank you. A written answer we can keep on file would be appreciated.
-
-[Name]
-Travelpayouts account: [account email or partner ID — the marker is not secret, but include
-only if needed]
-
----
-
-Record the reply (date, ticket number, summary, and the decision it supports) in the spec's
-§8.4 before enabling any non-Aviasales link. B6 stays **OPEN** until then.
+The questions that were asked: whether Data API reference fares may be shown next to ordinary
+public search links to other platforms; any conditions (Aviasales link prominence, attribution
+wording, email use); approved alternatives if not; and anything else to change in the
+project's Data API use.

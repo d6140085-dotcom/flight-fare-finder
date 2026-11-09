@@ -131,6 +131,12 @@ Settings (environment variables):
 | `DRY_RUN` | off | Any value except `0/false/no/off` turns it on. Parser: no SQS client is ever created; would-be messages are logged with a subscriber hash. Wrapper: every parser payload carries `"dry_run": true`, and the parser honours a payload flag that turns DRY_RUN **on** (never off) |
 | `FETCH_USD` | on | M1's best-effort USD lookup for the 約 US$ line; `0` halves Travelpayouts calls |
 | `V3_LIMIT` | `30` | Offers per v3 request (documented default 30, max 1000) |
+
+Travelpayouts limits and guidance (written reply, 2026-11-07): v3 `prices_for_dates` allows up
+to 600 requests per minute; refreshing a local cache about every 24 hours is recommended;
+TWD amounts are conversions and must be shown as approximate (「約 NT$」) once Phase 2B/3 display
+them. The fare check only produces numbers; labels are added where fares are displayed (the M1
+email's 「NT$」 line changes in Phase 2B, search links spec §8.5).
 | `MAX_WORK_ITEMS` | `500` | Safety cap per run; extra items are logged and wait for the next run |
 | `FARE_QUEUE_URL`, `TP_PARAM`, `PARSER_FUNCTION` | as M1 | Unchanged |
 
@@ -161,7 +167,8 @@ Fixtures live in `aws/tests/fixtures/travelpayouts/` (`<api>_<origin>_<dest>_<mo
 synthetic, documented field names). A missing response file behaves like an unreachable API.
 Tests: `python3 -m unittest aws/tests/test_m14_fare_check.py`.
 
-Live DRY_RUN against Travelpayouts (B5 evidence) needs **separate approval**. Proposed shape:
+Live Travelpayouts comparison (B5 evidence) needs **separate approval**. Preferred: the local,
+read-only plan in `docs/m1.4-b5-live-validation-plan.md` (no AWS at all). Alternative shape:
 a temporary isolated stack with two DRY_RUN-only functions from this ZIP, a role with only
 `dynamodb:Scan` on `subscriptions` (read), `ssm:GetParameter` on `/flight/travelpayouts` and
 `lambda:InvokeFunction` on its own parser — no SQS, no write, no notification access — run for
