@@ -32,3 +32,6 @@ __pycache__/
 
 # Lambda build output
 aws/build/
+
+# B5 live-validation results (local only; never commit raw responses)
+b5-results/

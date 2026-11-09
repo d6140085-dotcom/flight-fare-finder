@@ -1,0 +1,14 @@
+{
+  "_comment": "B5 live-validation sample (docs/m1.4-b5-live-validation-plan.md §3). Month offsets are months after the run's current month in Asia/Taipei (1 = next month). 36 work items -> 72 v1+v3 TWD requests per round, plus 3 v3 market-check requests.",
+  "plan_version": 1,
+  "groups": [
+    {"origin": "TPE", "month_offsets": [1, 4],
+     "destinations": ["TYO", "OSA", "SEL", "OKA", "HKG", "BKK", "SIN", "VCE", "LON", "NYC", "SYD", "KMJ"]},
+    {"origin": "TPE", "month_offsets": [10], "destinations": ["TYO", "BKK", "LON", "SYD"]},
+    {"origin": "KHH", "month_offsets": [1], "destinations": ["TYO", "OKA", "HKG", "BKK"]},
+    {"origin": "RMQ", "month_offsets": [4], "destinations": ["TYO", "OKA", "HKG", "SEL"]}
+  ],
+  "market_check": {"market": "tw", "month_offset": 1, "routes": ["TPE-TYO", "TPE-OSA", "KHH-OKA"]},
+  "limits": {"default_max_requests": 200, "absolute_max_requests": 300,
+             "default_interval_seconds": 2.0, "min_interval_seconds": 1.0}
+}
