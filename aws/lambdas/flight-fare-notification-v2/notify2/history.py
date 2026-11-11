@@ -17,7 +17,7 @@ from decimal import Decimal
 
 from botocore.exceptions import ClientError
 
-from . import keys, months
+from . import keys
 
 TABLE = "notification_history"
 
@@ -44,19 +44,33 @@ class History:
         return self.table.get_item(Key={"pk": pk, "sent_at": keys.STATE_SK}, ConsistentRead=True).get("Item")
 
     def legacy_last(self, email, route, since):
-        """Newest genuine M1 row for (email, route) sent at or after `since`, or None.
+        """Newest genuine M1 row for (email, route) sent at or after `since`, as
+        {"sent_at", "price" or None}, or None.
 
-        M1 rows have pk "{email}#{route}". Copies that v2 dual-writes for rollback safety carry
-        source="v2" and are skipped: v2's own month-aware state already covers them, and counting
-        them would let one month's send suppress another month. Rows older than the M1 floor can't
-        suppress anything (M1 sends again after the floor), so only the window is read."""
+        M1 rows (pk "{email}#{route}") hold only sent_at, email, route and price: no departure
+        month, no fare dates. Copies that v2 dual-writes for rollback safety carry source="v2" and
+        are skipped (v2's own state covers them). Rows whose sent_at isn't a valid ISO timestamp
+        can't be produced by M1 and are skipped. Rows older than the M1 floor can't suppress
+        anything under the M1 rule, so only that window is read."""
         kw = {"KeyConditionExpression": "pk = :p AND sent_at >= :s", "ScanIndexForward": False, "ConsistentRead": True,
               "ExpressionAttributeValues": {":p": keys.legacy_pk(email, route), ":s": iso_ms(since)}}
         while True:
             r = self.table.query(**kw)
             for item in r.get("Items") or []:
-                if item.get("source") != "v2":
-                    return item
+                if item.get("source") == "v2":
+                    continue
+                try:
+                    sent = datetime.fromisoformat(str(item.get("sent_at")))
+                except ValueError:
+                    continue
+                if sent.tzinfo is None or sent < since:
+                    continue
+                try:
+                    price = Decimal(str(item["price"]))
+                    price = price if price.is_finite() and price > 0 else None
+                except (KeyError, ArithmeticError, ValueError):
+                    price = None
+                return {"sent_at": sent.isoformat(), "price": price}
             if "LastEvaluatedKey" not in r:
                 return None
             kw["ExclusiveStartKey"] = r["LastEvaluatedKey"]
@@ -67,7 +81,9 @@ class History:
         if state is None:
             cond = "attribute_not_exists(pk)"
         else:
-            cond = "version = :v AND (attribute_not_exists(claim_event) OR claim_expires < :now)"
+            # a claim may be taken if free, expired, or already ours (the redelivery of the same
+            # fare event after a crash re-enters its own claim)
+            cond = "version = :v AND (attribute_not_exists(claim_event) OR claim_expires < :now OR claim_event = :e)"
             values.update({":v": state["version"], ":now": int(now.timestamp())})
         try:
             self.table.update_item(
@@ -142,15 +158,3 @@ class History:
                 if _code(e) != "ConditionalCheckFailedException":
                     raise
         return "claim_lost"
-
-
-def legacy_months(sent_at):
-    """Months an M1 (rolling) alert sent at `sent_at` could have been about: next month by the UTC
-    calendar (M1's parser) and by Asia/Taipei, at send time and one hour earlier (the parser runs
-    shortly before the notification)."""
-    t = datetime.fromisoformat(sent_at)
-    out = set()
-    for moment in (t, t - timedelta(hours=1)):
-        out.add(months.add_months(f"{moment.astimezone(timezone.utc):%Y-%m}", 1))
-        out.add(months.add_months(months.current_month(moment), 1))
-    return out

@@ -33,8 +33,13 @@ class Settings:
     resend_param: str = "/flight/resend"        # RESEND_PARAM (M1)
     lambda_timeout_seconds: int = 30            # LAMBDA_TIMEOUT_SECONDS: for the claim sanity check
     queue_visibility_seconds: int = 180         # QUEUE_VISIBILITY_SECONDS: for the claim sanity check
+    max_message_age_hours: Decimal = Decimal("20")  # MAX_MESSAGE_AGE_HOURS: never send for older fare events;
+                                                    # must stay below Resend's 24 h idempotency window
 
     def __post_init__(self):
+        if not Decimal("0") < self.max_message_age_hours < Decimal("24"):
+            raise ConfigError("MAX_MESSAGE_AGE_HOURS must be above 0 and below 24 (Resend keeps idempotency keys "
+                              "for 24 hours; every retry must stay inside that window)")
         if not self.lambda_timeout_seconds < self.claim_seconds < self.queue_visibility_seconds:
             raise ConfigError("CLAIM_SECONDS must be above the Lambda timeout and below the queue visibility "
                               "timeout, so a crashed claim expires before SQS redelivers the message")
@@ -53,7 +58,8 @@ class Settings:
                        pepper_param=env.get("DEDUP_PEPPER_PARAM") or "/flight/dedup-pepper",
                        resend_param=env.get("RESEND_PARAM") or "/flight/resend",
                        lambda_timeout_seconds=int(env.get("LAMBDA_TIMEOUT_SECONDS") or 30),
-                       queue_visibility_seconds=int(env.get("QUEUE_VISIBILITY_SECONDS") or 180))
+                       queue_visibility_seconds=int(env.get("QUEUE_VISIBILITY_SECONDS") or 180),
+                       max_message_age_hours=Decimal(env.get("MAX_MESSAGE_AGE_HOURS") or "20"))
         except (ArithmeticError, ValueError) as e:
             if isinstance(e, ConfigError):
                 raise

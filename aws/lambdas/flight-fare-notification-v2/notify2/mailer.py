@@ -36,18 +36,28 @@ def render(m, cities, airlines):
     return subject, page, "\n".join(lines + ["立即訂購：" + url])
 
 
-SENT, RETRY, DROP, DUPLICATE = "sent", "retry", "drop", "duplicate"
+SENT, RETRY, UNKNOWN, DROP, DUPLICATE = "sent", "retry", "unknown", "drop", "duplicate"
 
 
 def classify(status, body):
-    """Resend outcome -> sent / duplicate (already sent under this key) / retry / drop."""
+    """Resend outcome:
+    sent       2xx
+    duplicate  409 invalid_idempotent_request: this key was already used by an earlier request
+    retry      429: rejected before processing, nothing was sent; retry later
+    unknown    5xx, 409 concurrent_idempotent_requests, network/timeout: the email may have gone
+               out; retry later with the same key (Resend replays it within 24 h)
+    drop       other 4xx (e.g. 403/422), as M1"""
+    if status is None:
+        return UNKNOWN
     if 200 <= status < 300:
         return SENT
     if status == 409 and "invalid_idempotent_request" in body:
-        return DUPLICATE        # key already used: that earlier request was the send
-    if status == 409 or status == 429 or status >= 500:
-        return RETRY            # includes concurrent_idempotent_requests
-    return DROP                 # e.g. 403/422, as M1
+        return DUPLICATE
+    if status == 429:
+        return RETRY
+    if status == 409 or status >= 500:
+        return UNKNOWN
+    return DROP
 
 
 def send(cfg, to, subject, page, text, idempotency_key, opener=urllib.request.urlopen):
@@ -60,6 +70,6 @@ def send(cfg, to, subject, page, text, idempotency_key, opener=urllib.request.ur
         status, body = opener(req, timeout=10).status, ""
     except urllib.error.HTTPError as e:
         status, body = e.code, re.sub(r"\S+@\S+", "<email>", e.read().decode(errors="replace"))[:300]
-    except OSError as e:
-        return None, RETRY, type(e).__name__
+    except OSError as e:          # includes timeouts: the request may have reached Resend
+        return None, UNKNOWN, type(e).__name__
     return status, classify(status, body), body

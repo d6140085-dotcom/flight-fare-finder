@@ -62,8 +62,19 @@ class FakeResend:
         if self.hook:
             self.hook(body)
         with self.lock:
-            self.requests.append({"to": body["to"][0], "key": key, "subject": body["subject"]})
+            self.requests.append({"to": body["to"][0], "key": key, "subject": body["subject"], "body": body})
             status = self.statuses.pop(0) if self.statuses else 200
+            if status == "timeout":                       # never reached Resend
+                raise TimeoutError("timed out")
+            if status == "lost":                          # Resend sent it, the response was lost
+                if key not in self.keys:
+                    self.keys[key] = body
+                    self.deliveries.append(body["to"][0])
+                raise TimeoutError("timed out")
+            if isinstance(status, tuple):
+                code, name = status
+                raise urllib.error.HTTPError("https://api.resend.com/emails", code, "err", {},
+                                             io.BytesIO(json.dumps({"name": name}).encode()))
             if status != 200:
                 raise urllib.error.HTTPError("https://api.resend.com/emails", status, "err", {},
                                              io.BytesIO(json.dumps({"name": "x", "message": "to x@example.com"}).encode()))
@@ -121,8 +132,12 @@ class Base(unittest.TestCase):
                             pepper=PEPPER, resend_cfg=lambda: {"key": "re_test", "from": "test@example.com"},
                             subscriptions=self.subs if recheck else None, opener=self.resend, log=self.logs.append)
 
-    def run_msg(self, m, at=NOW, delivery=None, d=None):
-        return service.process(m, delivery or uuid.uuid4().hex, at, d or self.deps())
+    def run_msg(self, m, at=NOW, delivery=None, d=None, enqueued_at=None):
+        return service.process(m, delivery or uuid.uuid4().hex, at, d or self.deps(), enqueued_at=enqueued_at)
+
+    def state(self):
+        rows = [i for i in self.items() if i["sent_at"] == "STATE"]
+        return rows[0] if rows else None
 
     def sub(self, email=A, route="KHH-TYO", **kw):
         o, dst = route.split("-")
@@ -423,40 +438,186 @@ class DuplicateDeliveryTests(Base):
         self.assertEqual([i for i in self.items() if i["sent_at"] != "STATE"], [])   # nothing recorded
         self.assertEqual(self.run_msg(month_msg("2027-01")), "sent")                  # not suppressed by failures
         self.assertEqual(mailer.classify(409, '{"name":"invalid_idempotent_request"}'), mailer.DUPLICATE)
-        self.assertEqual(mailer.classify(409, '{"name":"concurrent_idempotent_requests"}'), mailer.RETRY)
+        self.assertEqual(mailer.classify(409, '{"name":"concurrent_idempotent_requests"}'), mailer.UNKNOWN)
+        self.assertEqual(mailer.classify(500, ""), mailer.UNKNOWN)
+        self.assertEqual(mailer.classify(None, "TimeoutError"), mailer.UNKNOWN)
+        self.assertEqual(mailer.classify(429, ""), mailer.RETRY)
+
+
+class IdempotencyTests(Base):
+    """Resend idempotency and the remaining delivery edges."""
+    def test_event_ids_are_deterministic(self):
+        pk = keys.stream_pk(keys.subscriber_id(A, PEPPER), "KHH-TYO", "2027-01")
+        m = month_msg("2027-01")
+        self.assertEqual(keys.event_id(pk, m, "d1"), keys.event_id(pk, json.loads(json.dumps(m)), "d1"))
+        self.assertNotEqual(keys.event_id(pk, m, "d1"), keys.event_id(pk, m, "d2"))          # no as_of: per delivery
+        v2 = month_msg("2027-01", as_of="2026-11-20T03:30:00Z")
+        self.assertEqual(keys.event_id(pk, v2, "d1"), keys.event_id(pk, v2, "d2"))         # as_of: per schedule
+        self.assertNotEqual(keys.event_id(pk, v2, "d1"), keys.event_id(pk, dict(v2, cheapest=dict(v2["cheapest"], price=1)), "d1"))
+        self.assertLessEqual(len(keys.idempotency_key(keys.event_id(pk, m, "d1"))), 256)
+
+    def test_response_lost_after_send_redelivery_does_not_resend(self):
+        self.resend.statuses = ["lost"]
+        m = month_msg("2027-01")
+        with self.assertRaises(service.Retry):
+            self.run_msg(m, delivery="msg-1", enqueued_at=NOW)
+        self.assertEqual(self.state()["claim_event"], self.resend_key_event())          # claim kept
+        other = month_msg("2027-01", price=7000)
+        with self.assertRaises(service.Retry):                                            # other events wait
+            self.run_msg(other, NOW + timedelta(seconds=60), delivery="msg-2")
+        self.assertEqual(self.run_msg(m, NOW + timedelta(seconds=60), delivery="msg-1"), "sent")   # re-enters its claim
+        self.assertEqual(len(self.resend.deliveries), 1)
+        self.assertEqual(self.resend.requests[0]["body"], self.resend.requests[-1]["body"])      # same payload
+        self.assertEqual(self.resend.requests[0]["key"], self.resend.requests[-1]["key"])
+
+    def resend_key_event(self):
+        return self.resend.requests[-1]["key"].split("/", 1)[1]
+
+    def test_timeout_before_reaching_resend_then_success(self):
+        self.resend.statuses = ["timeout"]
+        with self.assertRaises(service.Retry):
+            self.run_msg(month_msg("2027-01"), delivery="m")
+        self.assertEqual(self.run_msg(month_msg("2027-01"), NOW + timedelta(seconds=180), delivery="m"), "sent")
+        self.assertEqual(len(self.resend.deliveries), 1)
+
+    def test_409_concurrent_keeps_the_claim_and_retries(self):
+        self.resend.statuses = [(409, "concurrent_idempotent_requests")]
+        with self.assertRaises(service.Retry):
+            self.run_msg(month_msg("2027-01"), delivery="m")
+        self.assertIn("claim_event", self.state())
+        self.assertEqual(self.run_msg(month_msg("2027-01"), NOW + timedelta(seconds=180), delivery="m"), "sent")
+
+    def test_409_invalid_idempotent_request_is_recorded_as_sent(self):
+        self.resend.statuses = [(409, "invalid_idempotent_request")]
+        self.assertEqual(self.run_msg(month_msg("2027-01")), "sent:duplicate_key")
+        self.assertEqual(self.resend.deliveries, [])                        # nothing new went out
+        self.assertEqual(self.run_msg(month_msg("2027-01"), NOW + timedelta(hours=1)), "skipped:deduped")
+
+    def test_retry_after_the_key_window_never_sends_again(self):
+        self.resend.statuses = ["lost"]
+        m = month_msg("2027-01")
+        with self.assertRaises(service.Retry):
+            self.run_msg(m, delivery="msg-1", enqueued_at=NOW)
+        late = NOW + timedelta(hours=21)                                     # > MAX_MESSAGE_AGE_HOURS (20)
+        self.assertEqual(self.run_msg(m, late, delivery="msg-1", enqueued_at=NOW), "recorded:unconfirmed")
+        self.assertEqual(len(self.resend.requests), 1)                       # no second request at all
+        self.assertEqual(self.run_msg(month_msg("2027-01"), late + timedelta(hours=1)), "skipped:deduped")
+
+    def test_stale_messages_are_never_sent(self):
+        self.assertEqual(self.run_msg(month_msg("2027-01"), NOW + timedelta(hours=21), enqueued_at=NOW), "skipped:stale")
+        self.assertEqual(self.run_msg(month_msg("2027-01", as_of="2026-11-19T06:00:00Z")), "skipped:stale")
+        self.assertEqual(self.resend.requests, [])
+        with self.assertRaises(config.ConfigError):
+            config.Settings(max_message_age_hours=Decimal("24"))
+
+    def test_crash_then_subscription_paused_is_recorded_not_dropped(self):
+        self.sub(departure_month="2027-01")
+        d = self.deps(recheck=True)
+        real_commit, calls = d.history.commit, []
+
+        def crash_once(**kw):
+            if not calls:
+                calls.append(1)
+                raise RuntimeError("killed after send")
+            return real_commit(**kw)
+        d.history.commit = crash_once
+        with self.assertRaises(RuntimeError):
+            self.run_msg(month_msg("2027-01"), delivery="m", d=d)
+        self.sub(departure_month="2027-01", alerts_paused=True)
+        self.assertEqual(self.run_msg(month_msg("2027-01"), NOW + timedelta(seconds=180), delivery="m", d=d),
+                         "recorded:unconfirmed")
+        self.assertEqual(len(self.resend.deliveries), 1)
+
+
+class SqsHandlerTests(Base):
+    def test_time_budget_returns_unstarted_messages(self):
+        import handler as h
+        left = iter([60_000, 20_000, 10_000, 5_000])
+        recs = [{"messageId": f"m{i}", "body": json.dumps(month_msg(f"2027-0{i + 1}")),
+                 "attributes": {"SentTimestamp": str(int(NOW.timestamp() * 1000))}} for i in range(4)]
+        out = h.handle({"Records": recs}, self.deps(), now_fn=lambda: NOW, remaining_ms=lambda: next(left))
+        self.assertEqual(out, {"batchItemFailures": [{"itemIdentifier": "m2"}, {"itemIdentifier": "m3"}]})
+        self.assertEqual(len(self.resend.deliveries), 2)
+
+    def test_sent_timestamp_drives_staleness(self):
+        import handler as h
+        old = {"messageId": "old", "body": json.dumps(month_msg("2027-01")),
+               "attributes": {"SentTimestamp": str(int((NOW - timedelta(hours=21)).timestamp() * 1000))}}
+        self.assertEqual(h.handle({"Records": [old]}, self.deps(), now_fn=lambda: NOW), {"batchItemFailures": []})
+        self.assertEqual(self.resend.requests, [])
+        self.assertIsNone(h.sent_timestamp({"attributes": {"SentTimestamp": "x"}}))
 
 
 class LegacyHistoryTests(Base):
-    """11. Existing M1 notification_history rows are honoured (no resend on switch-over)."""
-    def m1_row(self, hours_ago, price=8000, email=A, route="KHH-TYO"):
+    """11. Existing M1 notification_history rows. They carry no departure month, so they are
+    treated as covering every month of the route (switch-over can't resend within 24 h)."""
+    def m1_row(self, hours_ago, price=8000, email=A, route="KHH-TYO", **override):
         t = (NOW - timedelta(hours=hours_ago)).isoformat(timespec="milliseconds")
-        self.hist.put_item(Item={"pk": f"{email}#{route}", "sent_at": t, "email": email, "route": route, "price": Decimal(price)})
+        if isinstance(price, int):
+            price = Decimal(price)
+        item = {"pk": f"{email}#{route}", "sent_at": t, "email": email, "route": route, "price": price}
+        item.update(override)
+        self.hist.put_item(Item={k: v for k, v in item.items() if v is not None})
 
-    def test_recent_m1_alert_suppresses_its_month_only(self):
-        self.m1_row(2)                                      # sent 2026-11-20 -> M1 rolling month 2026-12
-        self.assertEqual(history.legacy_months((NOW - timedelta(hours=2)).isoformat()), {"2026-12"})
-        self.assertEqual(self.run_msg(month_msg("2026-12")), "skipped:deduped")
-        self.assertEqual(self.run_msg(month_msg("2027-01")), "sent")
-        self.assertEqual(self.run_msg(month_msg("2026-12", price=5000)), "sent")        # big drop still alerts
+    def test_m1_rows_hold_no_month_information(self):
+        m1 = load_m1_notification()
+        m1._hist, m1._cfg = self.hist, {"key": "re_test", "from": "test@example.com"}
+        with mock.patch.object(m1.urllib.request, "urlopen", self.resend):
+            m1.process(msg(route="TPE-TYO"), NOW)
+        row = self.hist.query(KeyConditionExpression="pk = :p", ExpressionAttributeValues={":p": f"{A}#TPE-TYO"})["Items"][0]
+        self.assertEqual(set(row), {"pk", "sent_at", "email", "route", "price"})        # nothing about the month
+        self.assertEqual(row["sent_at"], "2026-11-20T04:00:00.000+00:00")
+
+    def test_recent_m1_alert_suppresses_every_month_of_the_route(self):
+        self.m1_row(2)
+        for mth in ("2026-12", "2027-01", "2027-06"):
+            self.assertEqual(self.run_msg(month_msg(mth)), "skipped:deduped", mth)
+        self.assertEqual(self.run_msg(month_msg("2027-01", route="KHH-OKA")), "sent")    # other route
+        self.assertEqual(self.run_msg(month_msg("2027-01", price=5000)), "sent")         # M1 price-drop rule
+        self.assertEqual(self.resend.deliveries, [A, A])
+
+    def test_switch_over_never_resends_within_24_hours(self):
+        for hours in (0.01, 1, 6, 12, 23.9):
+            self.setUp()
+            self.m1_row(hours, price=8000)
+            for mth in ("2026-12", "2027-01"):
+                for price in (8000, 7900, 6500):                                          # no 20 % / 2,000 drop
+                    self.assertEqual(self.run_msg(month_msg(mth, price=price)), "skipped:deduped", (hours, mth, price))
+            self.tearDown()
+        self.setUp()
+        self.m1_row(24.01)
+        self.assertEqual(self.run_msg(month_msg("2026-12")), "sent")
 
     def test_old_m1_alert_or_other_user_does_not_suppress(self):
         self.m1_row(25)
         self.m1_row(1, email=B)
         self.assertEqual(self.run_msg(month_msg("2026-12")), "sent")
 
-    def test_month_boundary_of_m1_rows(self):
-        utc_end = (datetime(2026, 11, 30, 23, 30, tzinfo=timezone.utc)).isoformat()   # Dec 1 Taipei, Nov 30 UTC
-        self.assertEqual(history.legacy_months(utc_end), {"2026-12", "2027-01"})
+    def test_ambiguous_m1_rows(self):
+        # no price: the 24 h floor still applies, and no price-drop re-alert against an unknown price
+        self.m1_row(2, price=None)
+        self.assertEqual(self.run_msg(month_msg("2027-01", price=3000)), "skipped:deduped")
+        self.setUp()
+        self.m1_row(2, price="not-a-number")
+        self.assertEqual(self.run_msg(month_msg("2027-01", price=3000)), "skipped:deduped")
+
+    def test_rows_m1_cannot_produce_are_ignored(self):
+        for bad in ("garbage-but-sorts-high", "2026-11-20T03:00:00.000"):                  # unparseable / no offset
+            self.setUp()
+            self.hist.put_item(Item={"pk": f"{A}#KHH-TYO", "sent_at": bad, "email": A, "route": "KHH-TYO",
+                                     "price": Decimal(8000)})
+            self.assertEqual(self.run_msg(month_msg("2027-01")), "sent", bad)
+            self.tearDown()
+        self.setUp()
 
     def test_v2_copies_never_suppress_another_month(self):
         self.assertEqual(self.run_msg(month_msg("2027-01")), "sent")          # dual-writes an M1-shape copy
-        at = NOW + timedelta(minutes=1)                                       # rolling month at NOW is 2026-12
-        self.assertEqual(self.run_msg(month_msg("2026-12"), at), "sent")
+        self.assertEqual(self.run_msg(month_msg("2026-12"), NOW + timedelta(minutes=1)), "sent")
 
     def test_genuine_m1_row_behind_a_newer_v2_copy_is_still_found(self):
-        self.m1_row(3)                                                        # genuine M1 alert for 2026-12
-        self.assertEqual(self.run_msg(month_msg("2027-01")), "sent")          # newer v2 copy on the same pk
-        self.assertEqual(self.run_msg(month_msg("2026-12"), NOW + timedelta(minutes=1)), "skipped:deduped")
+        self.m1_row(3)                                                        # genuine M1 alert
+        self.m1_row(1, source="v2", month="2027-02")                         # newer v2 copy on the same pk
+        self.assertEqual(self.run_msg(month_msg("2027-03")), "skipped:deduped")
 
     def test_same_millisecond_sends_for_two_months(self):
         d = self.deps()
@@ -501,6 +662,20 @@ class MigrationRollbackTests(Base):
         self.m1_process(self.m1(), dict(m, cheapest=dict(m["cheapest"], price=5000)), NOW + timedelta(hours=25))  # M1 at T+25h
         self.assertEqual(self.run_msg(m, NOW + timedelta(hours=26)), "skipped:deduped")   # v2 sees the newer M1 row
         self.assertEqual(len(self.resend.deliveries), 2)
+
+    def test_rollback_and_roll_forward_with_several_months(self):
+        self.assertEqual(self.run_msg(month_msg("2026-12")), "sent")
+        self.assertEqual(self.run_msg(month_msg("2027-01"), NOW + timedelta(minutes=5)), "sent")    # independent months
+        m1 = self.m1()
+        rolling = msg(depart="2026-12-10T08:00:00+08:00", ret="2026-12-15T19:00:00+09:00")
+        self.m1_process(m1, rolling, NOW + timedelta(hours=2))      # rolled back: M1 suppresses the route
+        self.assertEqual(len(self.resend.deliveries), 2)
+        self.m1_process(m1, rolling, NOW + timedelta(hours=25))     # M1's own 24 h rule then allows one
+        self.assertEqual(len(self.resend.deliveries), 3)
+        # rolled forward within 24 h of that M1 alert: no month of the route resends
+        for mth in ("2026-12", "2027-01", "2027-02"):
+            self.assertEqual(self.run_msg(month_msg(mth), NOW + timedelta(hours=26)), "skipped:deduped", mth)
+        self.assertEqual(self.run_msg(month_msg("2027-02"), NOW + timedelta(hours=49, minutes=1)), "sent")
 
     def test_existing_m1_rows_are_never_modified(self):
         t = (NOW - timedelta(hours=30)).isoformat(timespec="milliseconds")

@@ -43,12 +43,29 @@ def deps():
     return _deps
 
 
-def handle(event, d, now_fn=lambda: datetime.now(timezone.utc)):
+RESERVE_MS = 15_000   # stop starting new messages when less than this is left (Resend timeout 10 s + DB)
+
+
+def sent_timestamp(rec):
+    raw = (rec.get("attributes") or {}).get("SentTimestamp")
+    try:
+        return datetime.fromtimestamp(int(raw) / 1000, timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def handle(event, d, now_fn=lambda: datetime.now(timezone.utc), remaining_ms=None):
+    """Partial-batch semantics as M1. Messages not started because the invocation is about to
+    time out are reported as failures, so SQS redelivers them instead of the whole batch."""
     failures = []
     for rec in event.get("Records", []):
+        if remaining_ms is not None and remaining_ms() < RESERVE_MS:
+            d.log(f"retry {rec.get('messageId')}: not started, invocation time almost used")
+            failures.append({"itemIdentifier": rec["messageId"]})
+            continue
         try:
             m = json.loads(rec["body"])
-            service.process(m, rec.get("messageId"), now_fn(), d)
+            service.process(m, rec.get("messageId"), now_fn(), d, enqueued_at=sent_timestamp(rec))
         except keys.InvalidMessage as e:
             d.log(f"dropped {rec.get('messageId')}: invalid message ({e})")   # never retried forever
         except Exception as e:
@@ -63,4 +80,5 @@ def handler(event, context):
     except Exception as e:  # configuration or pepper problem: fail closed, retry the whole batch
         print(f"retry batch: setup failed: {type(e).__name__}")
         return {"batchItemFailures": [{"itemIdentifier": r["messageId"]} for r in event.get("Records", [])]}
-    return handle(event, d)
+    remaining = getattr(context, "get_remaining_time_in_millis", None)
+    return handle(event, d, remaining_ms=remaining)

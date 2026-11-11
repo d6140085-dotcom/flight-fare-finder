@@ -90,19 +90,31 @@ def recheck(deps, m, email, route, month, price, as_of):
     return None
 
 
-def previous_send(deps, state, email, route, month, now):
-    """Latest earlier alert for this stream: the v2 state, and (compatibility) the newest M1 row
-    if that M1 alert was about this month."""
+def previous_send(deps, state, email, route, month, now, price):
+    """Latest earlier alert for this stream: the v2 state and, for compatibility, the newest
+    genuine M1 alert for this user and route in the last NOTIFY_FLOOR_HOURS.
+
+    M1 rows record no departure month, so an M1 alert is treated as covering EVERY month of the
+    route. During the one-time switch-over this can delay another month's first v2 alert by up to
+    the floor (24 h), but it can never resend what M1 already sent. A row without a usable price
+    keeps only the time floor (no price-drop re-alert relative to an unknown price)."""
     v2 = {"sent_at": state["last_sent_at"], "price": state["last_price"]} if state and state.get("last_sent_at") else None
     legacy = None
     if deps.settings.legacy_read:
         row = deps.history.legacy_last(email, route, now - timedelta(hours=float(deps.settings.floor_hours)))
-        if row and month in history.legacy_months(row["sent_at"]):
-            legacy = {"sent_at": row["sent_at"], "price": row["price"]}
+        if row:
+            legacy = {"sent_at": row["sent_at"], "price": row["price"] if row["price"] is not None else price}
     return rules.latest(v2, legacy)
 
 
-def process(m, delivery_id, now, deps):
+def message_age_basis(m, enqueued_at):
+    """When the fare event was created: the scheduler's as_of, else the SQS SentTimestamp."""
+    if m.get("as_of"):
+        return as_of_of(m, None)
+    return enqueued_at
+
+
+def process(m, delivery_id, now, deps, enqueued_at=None):
     email, route, price = validate(m)
     month, month_source = keys.resolve_month(m)
     as_of = as_of_of(m, now)
@@ -115,9 +127,22 @@ def process(m, delivery_id, now, deps):
     if state and state.get("last_event_id") == eid:
         deps.log(f"{t}: skipped (duplicate event)")
         return "skipped:duplicate_event"
-    if state and state.get("claim_event") and int(state.get("claim_expires", 0)) >= int(now.timestamp()):
+    ours = bool(state and state.get("claim_event") == eid)          # an earlier attempt of this event
+    basis = message_age_basis(m, enqueued_at)
+    if basis and now - basis > timedelta(hours=float(deps.settings.max_message_age_hours)):
+        if ours:
+            # The earlier attempt may have sent, and Resend's key may be about to expire: don't send
+            # again, record it as a (possible) send so the M1 rule suppresses repeats.
+            deps.history.commit(pk=pk, eid=eid, now=now, price=price, route=route, month=month, sid=sid,
+                                email=email, dual_write=deps.settings.legacy_dual_write)
+            deps.log(f"{t}: recorded unconfirmed earlier attempt (message too old to resend)")
+            return "recorded:unconfirmed"
+        deps.log(f"{t}: skipped (stale fare event)")
+        return "skipped:stale"
+    if state and state.get("claim_event") and not ours and int(state.get("claim_expires", 0)) >= int(now.timestamp()):
         raise Retry(f"{t}: stream busy (claimed by another worker)")
-    if not rules.should_send(previous_send(deps, state, email, route, month, now), price, now, deps.settings):
+    if not ours and not rules.should_send(previous_send(deps, state, email, route, month, now, price), price, now,
+                                          deps.settings):
         deps.log(f"{t}: skipped (deduped)")
         return "skipped:deduped"
     try:
@@ -126,10 +151,16 @@ def process(m, delivery_id, now, deps):
         raise Retry(f"{t}: stream changed or claimed concurrently") from None
     try:
         reason = recheck(deps, m, email, route, month, price, as_of) if deps.settings.recheck_subscription else None
-        if reason:
+        if reason and not ours:
             deps.history.release(pk, eid)
             deps.log(f"{t}: skipped ({reason})")
             return f"skipped:{reason}"
+        if reason and ours:
+            # the earlier attempt may already have sent; record conservatively instead of dropping it
+            deps.history.commit(pk=pk, eid=eid, now=now, price=price, route=route, month=month, sid=sid,
+                                email=email, dual_write=deps.settings.legacy_dual_write)
+            deps.log(f"{t}: recorded unconfirmed earlier attempt ({reason})")
+            return "recorded:unconfirmed"
         subject, page, text = mailer.render(m, deps.cities or {}, deps.airlines or {})
         kw = {"opener": deps.opener} if deps.opener else {}
         status, outcome, err = mailer.send(deps.resend_cfg(), email, subject, page, text, keys.idempotency_key(eid), **kw)
@@ -142,6 +173,10 @@ def process(m, delivery_id, now, deps):
         label = "sent" + (":duplicate_key" if outcome == mailer.DUPLICATE else "") + (":claim_lost" if result == "claim_lost" else "")
         deps.log(f"{t}: {label} {price} (month from {month_source})")
         return label
+    if outcome == mailer.UNKNOWN:
+        # The email may have gone out. Keep the claim: other events wait until it expires, and the
+        # redelivery of this message re-enters it and retries with the same Idempotency-Key.
+        raise Retry(f"{t}: Resend outcome unknown ({status} {err}); claim kept")
     deps.history.release(pk, eid)
     if outcome == mailer.RETRY:
         raise Retry(f"{t}: Resend {status} {err}")
