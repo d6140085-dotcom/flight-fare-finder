@@ -29,6 +29,8 @@ sys.path.insert(0, str(AWS / "lambdas" / "flight-fare-check"))
 AVAILABLE = ddb_local.available()
 if AVAILABLE:
     from notify2 import config, history, keys, mailer, months, rules, service  # noqa: E402
+    from notify2 import searchlinks  # noqa: E402
+    LINKS_CONFIG, CATALOG = searchlinks.load_config(), searchlinks.load_catalog()
 
 PEPPER = "test-pepper-0123456789abcdef0123456789abcdef"
 NOW = datetime(2026, 11, 20, 4, 0, tzinfo=timezone.utc)          # 12:00 Taipei
@@ -130,7 +132,9 @@ class Base(unittest.TestCase):
         return service.Deps(settings=config.Settings(recheck_subscription=recheck, **settings),
                             history=history.History(self.hist, self.client, table_name=self.hist_name),
                             pepper=PEPPER, resend_cfg=lambda: {"key": "re_test", "from": "test@example.com"},
-                            subscriptions=self.subs if recheck else None, opener=self.resend, log=self.logs.append)
+                            subscriptions=self.subs if recheck else None, opener=self.resend, log=self.logs.append,
+                            # Phase 2B-2: the reference email needs a valid Aviasales marker (fake test value)
+                            links_config=LINKS_CONFIG, catalog=CATALOG, marker="000000")
 
     def run_msg(self, m, at=NOW, delivery=None, d=None, enqueued_at=None):
         return service.process(m, delivery or uuid.uuid4().hex, at, d or self.deps(), enqueued_at=enqueued_at)

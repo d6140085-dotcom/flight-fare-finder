@@ -5,13 +5,14 @@ today's date (Asia/Taipei) and the deploy-time Aviasales marker. Every output is
 the platform's own host with an allow-listed set of query keys.
 
 - An itinerary link is built only when the platform's format has been verified for both codes
-  (verified_codes) and both dates are valid; otherwise that platform gets its safe fallback with
-  the notice 「請自行確認航線與日期」. A link is never one-way.
+  (verified_codes) and both dates are valid; otherwise that platform gets its general search page,
+  labelled 「一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）」. A link is never one-way.
 - URL formats and query keys are fixed in code (spec §4.2); search-platforms.json only switches
   platforms on/off, orders them and lists verified codes. It never holds a marker or ID.
 - Travelpayouts' written conditions (2026-11-07): a clearly labelled Aviasales affiliate link must
-  stay available whenever other platforms are shown. Without a valid deploy-time marker only the
-  plain Aviasales link is built and every other platform is suppressed (fail closed).
+  stay available wherever Data API reference fares are shown. Without a valid deploy-time marker
+  NO links are built (LinkSet.compliant is False) and the caller must not send the email
+  (fail closed); a plain, non-affiliate Aviasales link is never produced.
 """
 import calendar
 import json
@@ -28,8 +29,7 @@ CODE_RE = re.compile(r"^[A-Z]{3}$")
 MARKER_RE = re.compile(r"^[0-9]{3,12}$")
 WINDOW_MONTHS = 13                              # spec §4.1
 ITINERARY, FALLBACK = "itinerary", "fallback"
-FALLBACK_NOTICE = "請自行確認航線與日期"
-GOOGLE_NOTICE = "需手動輸入航線與日期"
+FALLBACK_NOTICE = "未帶入行程，請自行輸入並確認航線與日期"   # every general-search-page link
 
 HOSTS = {"skyscanner": "www.skyscanner.com.tw", "tripcom": "tw.trip.com",
          "aviasales": "www.aviasales.com", "google": "www.google.com"}
@@ -64,7 +64,7 @@ class Link:
     kind: str                 # itinerary | fallback
     role: str                 # primary | secondary | source | fallback_only
     affiliate: bool = False
-    notice: str = None        # set on fallback links
+    notice: str = None        # set on general-search-page (fallback) links
 
 
 @dataclass(frozen=True)
@@ -77,6 +77,12 @@ class LinkSet:
     @property
     def has_affiliate(self):
         return any(link.affiliate for link in self.links)
+
+    @property
+    def compliant(self):
+        """Travelpayouts condition 3: a labelled Aviasales affiliate link is present."""
+        av = self.aviasales
+        return bool(av and av.affiliate)
 
     @property
     def aviasales(self):
@@ -156,12 +162,9 @@ def validate_config(cfg):
             raise ConfigError("search-platforms.json must not contain a marker, ID, token or secret; "
                               "the marker is injected at deploy time (TP_MARKER)")
     av = next((p for p in plats if p["id"] == "aviasales"), None)
-    others = [p["id"] for p in plats if p["enabled"] and p["id"] != "aviasales"]
-    av_aff = bool(av and av["enabled"] and (av.get("affiliate") or {}).get("enabled")
-                  and av["affiliate"].get("required"))
-    if others and not av_aff:
-        raise ConfigError(f"{others} enabled while the labelled Aviasales affiliate link is not "
-                          "(Travelpayouts condition, spec §8.5)")
+    if not (av and av["enabled"] and (av.get("affiliate") or {}).get("enabled") and av["affiliate"].get("required")):
+        raise ConfigError("the labelled Aviasales affiliate link must be enabled and required: reference fares "
+                          "come from the Aviasales Data API (Travelpayouts condition 3, spec §8.5)")
     return cfg
 
 
@@ -236,61 +239,60 @@ def aviasales_url(o, d, dep, ret, marker=None):
 
 # ---- builder ----------------------------------------------------------------------------------
 
-AVIASALES_TAGS = {True: "票價來源・聯盟連結・英文介面", False: "票價來源・英文介面"}
+AVIASALES_TAGS = "票價來源・聯盟連結・英文介面"
 
 
-def _label(pid, label, kind, affiliate=False):
+def _label(pid, label, kind):
     if pid == "aviasales":
-        tags = AVIASALES_TAGS[affiliate]
-        return (f"在 Aviasales 搜尋此行程（{tags}）" if kind == ITINERARY
-                else f"前往 Aviasales（{tags}・需自行確認航線與日期）")
-    if pid == "google":
-        return f"在 {label}自行搜尋（{GOOGLE_NOTICE}）"
-    return f"在 {label} 搜尋此行程" if kind == ITINERARY else f"前往 {label}（需自行確認航線與日期）"
+        return (f"在 Aviasales 搜尋此行程（{AVIASALES_TAGS}）" if kind == ITINERARY
+                else f"前往 Aviasales 一般搜尋頁（{AVIASALES_TAGS}；{FALLBACK_NOTICE}）")
+    if kind == ITINERARY:
+        return f"在 {label} 搜尋此行程"
+    return f"前往 {label} 一般搜尋頁（{FALLBACK_NOTICE}）"
 
 
 def build(origin, destination, depart_date, return_date, today, *, catalog, config, marker=None):
-    """LinkSet for one round-trip reference fare. Bad input never raises: unsupported codes give
-    an empty LinkSet, bad dates give fallbacks (spec §6)."""
+    """LinkSet for one round-trip reference fare. Bad input never raises: unsupported codes and a
+    missing/invalid marker give an empty, non-compliant LinkSet; bad dates give general search
+    pages (spec §6)."""
     if not (isinstance(origin, str) and isinstance(destination, str) and CODE_RE.match(origin)
             and CODE_RE.match(destination) and origin in catalog.origins and destination in catalog.destinations):
         return LinkSet(reasons=("unsupported_code",))
     dep, ret = parse_day(depart_date), parse_day(return_date)
     problem = date_problem(dep, ret, today)
-    marker_ok = valid_marker(marker)
-    reasons = tuple(r for r in (problem, None if marker_ok else "no_valid_aviasales_marker") if r)
+    if not valid_marker(marker):
+        # fail closed: no affiliate link -> no links at all (never a plain Aviasales link)
+        return LinkSet((), problem is None, True, tuple(r for r in (problem, "no_valid_aviasales_marker") if r))
     links = []
     for p in sorted(config["platforms"], key=lambda x: x["order"]):
         pid, label, role = p["id"], p["label"], p.get("role", "")
-        if not p["enabled"] or (pid != "aviasales" and not marker_ok):
-            continue                                   # condition 3: no third-party links without it
+        if not p["enabled"]:
+            continue
         vc = p["verified_codes"]["codes"]
         verified = vc == "catalog" or (origin in vc and destination in vc)
         ov = p.get("code_overrides") or {}
         o, d = ov.get(origin, origin), ov.get(destination, destination)
         itinerary = problem is None and verified
         if pid == "aviasales":
-            affiliate = marker_ok and bool((p.get("affiliate") or {}).get("enabled"))
-            m = marker if affiliate else None
+            if not (p.get("affiliate") or {}).get("enabled"):
+                continue                               # validate_config forbids this; never plain
             if itinerary and aviasales_year_safe(ret, today):
-                links.append(Link(pid, _label(pid, label, ITINERARY, affiliate), aviasales_url(o, d, dep, ret, m),
-                                  ITINERARY, role, affiliate))
+                links.append(Link(pid, _label(pid, label, ITINERARY), aviasales_url(o, d, dep, ret, marker),
+                                  ITINERARY, role, True))
             else:
-                url = FALLBACK_URLS[pid] + (f"?{_q({'marker': m})}" if m else "")
-                links.append(Link(pid, _label(pid, label, FALLBACK, affiliate), url, FALLBACK, role, affiliate,
-                                  FALLBACK_NOTICE))
-        elif pid == "google":
-            links.append(Link(pid, _label(pid, label, FALLBACK), FALLBACK_URLS[pid], FALLBACK, role, False,
-                              GOOGLE_NOTICE))
-        elif itinerary:
+                links.append(Link(pid, _label(pid, label, FALLBACK), FALLBACK_URLS[pid] + "?" + _q({"marker": marker}),
+                                  FALLBACK, role, True, FALLBACK_NOTICE))
+        elif itinerary and pid in ("skyscanner", "tripcom"):
             url = (skyscanner_url if pid == "skyscanner" else tripcom_url)(o, d, dep, ret)
             links.append(Link(pid, _label(pid, label, ITINERARY), url, ITINERARY, role))
-        else:
+        else:                                          # Google is always a general search page
             links.append(Link(pid, _label(pid, label, FALLBACK), FALLBACK_URLS[pid], FALLBACK, role, False,
                               FALLBACK_NOTICE))
+    if not any(link.platform == "aviasales" and link.affiliate for link in links):
+        return LinkSet((), problem is None, True, tuple(r for r in (problem, "aviasales_affiliate_disabled") if r))
     for link in links:
-        check_url(link, marker if marker_ok else None)
-    return LinkSet(tuple(links), problem is None, not marker_ok, reasons)
+        check_url(link, marker)
+    return LinkSet(tuple(links), problem is None, False, tuple(r for r in (problem,) if r))
 
 
 def check_url(link, marker=None):

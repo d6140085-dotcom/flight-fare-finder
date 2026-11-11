@@ -78,7 +78,8 @@ email unchanged. Design, deployment steps and rollback: `docs/m1.4-phase2b1-mont
 M1 links carry no marker. Phase 2B-2 (code only, not deployed) adds it to the v2 notification
 Lambda: the Travelpayouts partner ID ("marker", not a secret but an account identifier, so never
 committed) is read from the env var `TP_MARKER` at deploy time and appended as `?marker=<id>` to
-Aviasales links only. Without a valid marker, v2 shows only the plain Aviasales link. The
+Aviasales links only. Without a valid marker, v2 blocks the reference-fare email (nothing sent,
+nothing recorded) rather than show a non-affiliate link. The
 Travelpayouts API token is unrelated and must never appear in links. See
 `docs/m1.4-phase2b2-search-links.md`.
 

@@ -180,8 +180,8 @@ class LocalizationTests(unittest.TestCase):
         labels = {x.platform: x.label for x in build().links}
         self.assertEqual(labels, {"skyscanner": "在 Skyscanner 搜尋此行程", "tripcom": "在 Trip.com 搜尋此行程",
                                   "aviasales": "在 Aviasales 搜尋此行程（票價來源・聯盟連結・英文介面）",
-                                  "google": "在 Google 航班自行搜尋（需手動輸入航線與日期）"})
-        for ls in (build(), build(d="LON"), build(dep=None), build(marker=None)):
+                                  "google": "前往 Google 航班 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"})
+        for ls in (build(), build(d="LON"), build(dep=None)):
             for link in ls.links:
                 self.assertTrue(CJK.search(link.label), link.label)
                 for simplified in ("搜寻", "来源", "链接", "联盟", "需手动", "航线"):
@@ -232,23 +232,63 @@ class FallbackTests(unittest.TestCase):
         c = cfg_with(tripcom={"verified_codes": {"codes": []}})          # simulated broken URL format
         links = by(build(cfg=c))
         self.assertEqual((links["tripcom"].kind, links["tripcom"].url), ("fallback", "https://tw.trip.com/flights/"))
-        self.assertEqual(links["tripcom"].label, "前往 Trip.com（需自行確認航線與日期）")
+        self.assertEqual(links["tripcom"].label, "前往 Trip.com 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）")
         self.assertEqual(links["skyscanner"].kind, "itinerary")
 
     def test_order_comes_from_config(self):
         c = cfg_with(skyscanner={"order": 2}, tripcom={"order": 1})
         self.assertEqual([x.platform for x in build(cfg=c).links], ["tripcom", "skyscanner", "aviasales", "google"])
 
-    def test_no_marker_keeps_only_the_plain_aviasales_link(self):
-        for marker in (None, "", "abc", "12", "1234567.sub", "1234567&x=1", " 123456", "1" * 13, 123456, "１２３４５６"):
-            ls = build(marker=marker)
-            self.assertEqual([x.platform for x in ls.links], ["aviasales"], marker)
-            av = ls.aviasales
-            self.assertFalse(av.affiliate)
-            self.assertEqual(av.url, "https://www.aviasales.com/search/TPE1112TYO18121")
-            self.assertEqual(av.label, "在 Aviasales 搜尋此行程（票價來源・英文介面）")
-            self.assertTrue(ls.third_party_suppressed)
-            self.assertIn("no_valid_aviasales_marker", ls.reasons)
+    def test_general_search_pages_are_labelled_as_such(self):
+        """Every fallback says it is a general search page, that nothing was carried over and that
+        the user must enter the route and dates; it never claims the itinerary or a price."""
+        for ls in (build(dep=None), build(d="LON"), build(dep="2027-10-01", ret="2027-11-20"), build()):
+            for link in ls.links:
+                if link.kind == "fallback":
+                    self.assertIn("一般搜尋頁", link.label)
+                    self.assertIn("未帶入行程", link.label)
+                    self.assertIn("請自行輸入並確認航線與日期", link.label)
+                    self.assertNotIn("搜尋此行程", link.label)
+                    self.assertTrue(link.label.startswith("前往 "))
+                    self.assertEqual(link.notice, sl.FALLBACK_NOTICE)
+                    self.assertEqual(urllib.parse.urlsplit(link.url).path in ("/", "/flights/", "/travel/flights"), True)
+                else:
+                    self.assertIn("搜尋此行程", link.label)
+                for word in ("同價", "相同價格", "保證", "此價格", "NT$"):
+                    self.assertNotIn(word, link.label)
+        av = by(build(dep=None))["aviasales"]
+        self.assertEqual(av.label, "前往 Aviasales 一般搜尋頁（票價來源・聯盟連結・英文介面；未帶入行程，請自行輸入並確認航線與日期）")
+        self.assertEqual(av.url, "https://www.aviasales.com/?marker=000000")
+
+    def test_missing_or_invalid_marker_gives_no_links_at_all(self):
+        """Fail closed: never a plain Aviasales link, never third-party links without the affiliate link."""
+        for marker in (None, "", "abc", "12", "1234567.sub", "1234567&x=1", " 123456", "123456\n", "1" * 13,
+                       123456, "１２３４５６", "eyJhbGciOi", "user@example.com"):
+            for dep, ret in (("2026-12-11", "2026-12-18"), (None, None)):
+                ls = build(marker=marker, dep=dep, ret=ret)
+                self.assertEqual(ls.links, (), marker)
+                self.assertFalse(ls.compliant)
+                self.assertIsNone(ls.aviasales)
+                self.assertTrue(ls.third_party_suppressed)
+                self.assertIn("no_valid_aviasales_marker", ls.reasons)
+        self.assertTrue(build().compliant)
+
+    def test_no_third_party_links_without_the_affiliate_link(self):
+        """Even if config validation were bypassed, a LinkSet with other platforms always has the
+        labelled Aviasales affiliate link, or is empty."""
+        tampered = cfg_with(aviasales={"affiliate": {"enabled": False}})          # invalid, not validated here
+        ls = build(cfg=tampered)
+        self.assertEqual((ls.links, ls.compliant), ((), False))
+        self.assertIn("aviasales_affiliate_disabled", ls.reasons)
+        ls = build(cfg=cfg_with(aviasales={"enabled": False}))
+        self.assertEqual((ls.links, ls.compliant), ((), False))
+        for o in ("TPE", "KHH", "RMQ"):
+            for dest in CATALOG["destinations"]:
+                for marker in (MARKER, None):
+                    ls = build(o, dest["code"], marker=marker)
+                    if ls.links:
+                        self.assertTrue(ls.compliant)
+                        self.assertEqual(sum(1 for x in ls.links if x.platform == "aviasales" and x.affiliate), 1)
 
 
 class PrivacyAndAffiliateTests(unittest.TestCase):
@@ -259,7 +299,9 @@ class PrivacyAndAffiliateTests(unittest.TestCase):
             for d in ("TYO", "OKA", "LON", "NYC", "BKK"):
                 for dep, ret in (("2026-12-11", "2026-12-18"), (None, None), ("2027-10-01", "2027-11-20")):
                     for marker in (MARKER, None):
-                        yield build(o, d, dep, ret, marker=marker)
+                        ls = build(o, d, dep, ret, marker=marker)
+                        self.assertEqual(bool(ls.links), marker == MARKER)
+                        yield ls
 
     def test_urls_carry_nothing_personal_or_secret(self):
         digest = hashlib.sha256(EMAIL.encode()).hexdigest()
@@ -268,7 +310,8 @@ class PrivacyAndAffiliateTests(unittest.TestCase):
                 u = urllib.parse.urlsplit(link.url)
                 self.assertEqual(u.scheme, "https")
                 self.assertEqual(u.netloc, sl.HOSTS[link.platform])
-                for bad in ("@", "%40", EMAIL, digest[:8], "eyJ", "token", "secret", "user", "email", "sub="):
+                for bad in ("@", "%40", EMAIL, digest[:8], "eyJ", "token", "secret", "user", "email", "sub=",
+                            "tp_token", "jwt", "password", "key="):
                     self.assertNotIn(bad, link.url.lower() if bad.islower() else link.url)
                 keys = [k for k, _ in urllib.parse.parse_qsl(u.query, keep_blank_values=True)]
                 self.assertTrue(set(keys) <= sl.ALLOWED_QUERY[link.platform], link.url)
@@ -350,16 +393,18 @@ class RenderTests(unittest.TestCase):
                 self.assertNotIn("立即訂購", part)
                 self.assertNotIn("保證", part)
 
-    def test_disclosure_only_with_the_affiliate_link(self):
-        for links in (build(marker=None), None, sl.LinkSet()):
-            subject, page, text = self.render(links=links)
-            self.assertNotIn(mailer.AFFILIATE_DISCLOSURE, page + text)
-            self.assertIn(mailer.DISCLAIMER, page)
-            self.assertIn(mailer.DISCLAIMER, text)
-            self.assertIn("參考票價（來源：Aviasales）：約 NT$8,062", text)
-        subject, page, text = self.render(links=None)                     # zero links still renders
-        self.assertNotIn("href", page)
-        self.assertNotIn("http", text)
+    def test_render_refuses_without_the_affiliate_link(self):
+        bad_link_sets = [build(marker=None), build(marker="abc"), None, sl.LinkSet(),
+                         sl.LinkSet((sl.Link("aviasales", "x", "https://www.aviasales.com/search/TPE1112TYO18121",
+                                             "itinerary", "source", False),)),                    # plain link
+                         sl.LinkSet(tuple(x for x in build().links if x.platform != "aviasales"))]  # third-party only
+        for links in bad_link_sets:
+            with self.assertRaises(mailer.AffiliateLinkUnavailable) as cm:
+                self.render(links=links)
+            self.assertNotIn(MARKER, cm.exception.reason)
+        with self.assertRaises(mailer.AffiliateLinkUnavailable) as cm:
+            self.render(links=build(marker=None))
+        self.assertEqual(cm.exception.reason, "no_valid_aviasales_marker")
 
     def test_no_other_platform_named_next_to_the_price(self):
         subject, page, text = self.render()
@@ -374,7 +419,11 @@ class RenderTests(unittest.TestCase):
         self.assertIn(mailer.FALLBACK_LINE, text)
         self.assertIn(mailer.FALLBACK_LINE, page)
         self.assertEqual(mailer.FALLBACK_NOTICE, sl.FALLBACK_NOTICE)
-        self.assertNotIn(mailer.FALLBACK_LINE, self.render()[2])           # all itinerary links: no notice
+        self.assertIn("一般搜尋頁", mailer.FALLBACK_LINE)
+        self.assertIn("價格可能與 Aviasales 參考票價不同", mailer.FALLBACK_LINE)
+        self.assertIn(mailer.FALLBACK_LINE, self.render()[2])               # Google is always a general page
+        only_itinerary = sl.LinkSet(tuple(x for x in build().links if x.kind == "itinerary"))
+        self.assertNotIn(mailer.FALLBACK_LINE, self.render(links=only_itinerary)[2])
 
 
 class ConfigValidationTests(unittest.TestCase):
@@ -413,13 +462,12 @@ class ConfigValidationTests(unittest.TestCase):
         self.bad(cfg_with(skyscanner={"enabled": "yes"}))
         self.bad({"platforms": []})
 
-    def test_aviasales_alone_without_affiliate_is_allowed(self):
-        c = cfg_with(skyscanner={"enabled": False}, tripcom={"enabled": False}, google={"enabled": False},
-                     aviasales={"affiliate": {"enabled": False}})
-        sl.validate_config(c)
-        ls = build(cfg=c)
-        self.assertEqual([(x.platform, x.affiliate) for x in ls.links], [("aviasales", False)])
-        self.assertNotIn("marker", ls.links[0].url)
+    def test_aviasales_affiliate_link_is_always_required(self):
+        only_av = dict(skyscanner={"enabled": False}, tripcom={"enabled": False}, google={"enabled": False})
+        sl.validate_config(cfg_with(**only_av))
+        self.bad(cfg_with(**only_av, aviasales={"affiliate": {"enabled": False}}))
+        self.bad(cfg_with(**only_av, aviasales={"affiliate": {"enabled": True, "param": "marker", "env": "TP_MARKER",
+                                                               "required": False}}))
 
 
 class ServiceIntegrationTests(unittest.TestCase):
@@ -451,30 +499,36 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertNotIn("transport/flights/tpe", text)
         self.assertEqual(self.logs, ["t: links: departure_in_the_past"])
 
-    def test_builder_error_sends_without_links(self):
+    def blocked(self, d, m=None):
+        with self.assertRaises(mailer.AffiliateLinkUnavailable) as cm:
+            service.render(m or fare(), self.NOW, d, "t")
+        return cm.exception.reason
+
+    def test_builder_error_blocks_the_email(self):
         broken = copy.deepcopy(CFG)
         del broken["platforms"][0]["verified_codes"]
-        subject, page, text = service.render(fare(), self.NOW, self.deps(links_config=broken), "t")
-        self.assertNotIn("http", text)
-        self.assertIn(mailer.DISCLAIMER, text)
-        self.assertEqual(self.logs, ["t: links: error KeyError"])
+        self.assertEqual(self.blocked(self.deps(links_config=broken)), "link_builder_error:KeyError")
 
-    def test_links_disabled_and_m1_rollback(self):
-        subject, page, text = service.render(fare(), self.NOW, self.deps(links_config=None), "t")
-        self.assertNotIn("http", text)
-        d = self.deps(settings=config.Settings(email_template="m1"))
-        subject, page, text = service.render(fare(), self.NOW, d, "t")
+    def test_missing_config_or_marker_blocks_and_m1_rollback_is_unchanged(self):
+        self.assertEqual(self.blocked(self.deps(links_config=None)), "links_config_unavailable")
+        self.assertEqual(self.blocked(self.deps(catalog=None)), "links_config_unavailable")
+        self.assertEqual(self.blocked(self.deps(marker=None)), "no_valid_aviasales_marker")
+        self.assertEqual(self.blocked(self.deps(marker="12345x")), "no_valid_aviasales_marker")
+        self.assertEqual(self.blocked(self.deps(), fare(route="TPE-ZZZ")), "unsupported_code")
+        d = self.deps(settings=config.Settings(email_template="m1"), marker=None, links_config=None)
+        subject, page, text = service.render(fare(), self.NOW, d, "t")              # M1: no marker needed
+        self.assertEqual((subject, page, text), mailer.render(fare(), CITIES, {}))
         self.assertIn("立即訂購", text)
-        self.assertEqual(subject, mailer.render(fare(), CITIES, {})[0])
         with self.assertRaises(config.ConfigError):
             config.Settings.from_env({"EMAIL_TEMPLATE": "fancy"})
         self.assertEqual(config.Settings.from_env({}).email_template, "reference")
 
     def test_logs_carry_no_personal_data(self):
-        service.render(fare(route="KHH-LON", dep="bad", ret=None), self.NOW, self.deps(marker=None), "t")
+        self.blocked(self.deps(marker="99999x"), fare(route="KHH-LON", dep="bad", ret=None))
+        service.render(fare(dep="bad"), self.NOW, self.deps(), "t")
         joined = " ".join(self.logs)
-        self.assertNotIn("@", joined)
-        self.assertNotIn(MARKER, joined)
+        for bad in ("@", MARKER, "99999x", EMAIL):
+            self.assertNotIn(bad, joined)
 
     def test_handler_link_deps(self):
         import handler as h
@@ -484,12 +538,15 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(d["links_config"])
         self.assertIsNotNone(d["catalog"])
         logs.clear()
-        d = h.link_deps({"TP_MARKER": "abc.def"}, log=logs.append)
+        d = h.link_deps({"TP_MARKER": "abc.def", "TP_TOKEN": "tok-secret-value"}, log=logs.append)
         self.assertIsNone(d["marker"])
-        self.assertNotIn("abc", " ".join(logs))
+        self.assertEqual(logs, ["links: ERROR TP_MARKER has an unexpected format; reference-fare emails will be "
+                                "blocked (EMAIL_TEMPLATE=reference)"])
         logs.clear()
-        self.assertIsNone(h.link_deps({}, log=logs.append)["marker"])
-        self.assertEqual(len(logs), 1)
+        self.assertIsNone(h.link_deps({"TP_TOKEN": "tok-secret-value"}, log=logs.append)["marker"])
+        self.assertEqual(logs, ["links: ERROR TP_MARKER is not set; reference-fare emails will be blocked "
+                                "(EMAIL_TEMPLATE=reference)"])
+        self.assertNotIn("tok-secret-value", repr(d))
 
 
 class EndToEndTests(unittest.TestCase):
@@ -502,7 +559,7 @@ class EndToEndTests(unittest.TestCase):
             raise unittest.SkipTest("boto3/moto not available")
         cls.dedup = dedup
 
-    def run_case(self, marker, **fare_kw):
+    def run_case(self, marker, links_config=CFG, **fare_kw):
         dedup = self.dedup
 
         class Case(dedup.Base):
@@ -513,17 +570,18 @@ class EndToEndTests(unittest.TestCase):
         case.setUp()
         try:
             d = case.deps()
-            d.links_config, d.catalog, d.marker, d.cities = CFG, CAT, marker, CITIES
+            d.links_config, d.catalog, d.marker, d.cities = links_config, CAT, marker, CITIES
             m = fare(**fare_kw)
             now = datetime(2026, 11, 11, 2, 0, tzinfo=timezone.utc)
             result = service.process(m, "delivery-1", now, d)
-            return result, case.resend.requests, case.logs
+            return result, case.resend.requests, case.logs, case.items()
         finally:
             case.tearDown()
 
     def test_sent_email_contains_the_links(self):
-        result, requests, logs = self.run_case(MARKER)
+        result, requests, logs, items = self.run_case(MARKER)
         self.assertEqual(result, "sent")
+        self.assertTrue(any(i["sent_at"] == "STATE" and i.get("last_event_id") for i in items))
         body = requests[0]["body"]
         self.assertEqual(body["to"], [EMAIL])
         self.assertIn("https://www.aviasales.com/search/TPE1112TYO18121?marker=000000", body["text"])
@@ -533,13 +591,21 @@ class EndToEndTests(unittest.TestCase):
             self.assertNotIn(EMAIL, url)
             self.assertNotIn("@", url)
 
-    def test_without_marker_only_the_plain_aviasales_link(self):
-        result, requests, logs = self.run_case(None)
-        self.assertEqual(result, "sent")
-        text = requests[0]["body"]["text"]
-        self.assertEqual(re.findall(r"https://\S+", text), ["https://www.aviasales.com/search/TPE1112TYO18121"])
-        self.assertNotIn(mailer.AFFILIATE_DISCLOSURE, text)
-        self.assertTrue(any("no_valid_aviasales_marker" in x for x in logs))
+    def test_blocked_notifications_send_nothing_and_record_nothing(self):
+        broken = copy.deepcopy(CFG)
+        del broken["platforms"][0]["verified_codes"]
+        for marker, cfg, reason in ((None, CFG, "no_valid_aviasales_marker"),
+                                    ("not-a-marker", CFG, "no_valid_aviasales_marker"),
+                                    (MARKER, None, "links_config_unavailable"),
+                                    (MARKER, broken, "link_builder_error:KeyError")):
+            result, requests, logs, items = self.run_case(marker, links_config=cfg)
+            self.assertEqual(result, f"blocked:{reason}")
+            self.assertEqual(requests, [])                         # Resend never called
+            self.assertEqual(items, [])                            # no claim, no STATE, no log, no M1 row
+            self.assertTrue(any("BLOCKED" in x for x in logs))
+            for x in logs:
+                self.assertNotIn("@", x)
+                self.assertNotIn("not-a-marker", x)
 
 
 class PackagingTests(unittest.TestCase):

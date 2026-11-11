@@ -31,7 +31,7 @@
      "platform": "google",
      "kind": "fallback",
      "url": "https://www.google.com/travel/flights?hl=zh-TW",
-     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+     "label": "前往 Google 航班 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"
     }
    ]
   },
@@ -63,7 +63,7 @@
      "platform": "google",
      "kind": "fallback",
      "url": "https://www.google.com/travel/flights?hl=zh-TW",
-     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+     "label": "前往 Google 航班 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"
     }
    ]
   },
@@ -77,7 +77,7 @@
      "platform": "skyscanner",
      "kind": "fallback",
      "url": "https://www.skyscanner.com.tw/",
-     "label": "前往 Skyscanner（需自行確認航線與日期）"
+     "label": "前往 Skyscanner 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"
     },
     {
      "platform": "tripcom",
@@ -95,7 +95,7 @@
      "platform": "google",
      "kind": "fallback",
      "url": "https://www.google.com/travel/flights?hl=zh-TW",
-     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+     "label": "前往 Google 航班 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"
     }
    ]
   },
@@ -109,7 +109,7 @@
      "platform": "skyscanner",
      "kind": "fallback",
      "url": "https://www.skyscanner.com.tw/",
-     "label": "前往 Skyscanner（需自行確認航線與日期）"
+     "label": "前往 Skyscanner 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"
     },
     {
      "platform": "tripcom",
@@ -127,7 +127,7 @@
      "platform": "google",
      "kind": "fallback",
      "url": "https://www.google.com/travel/flights?hl=zh-TW",
-     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+     "label": "前往 Google 航班 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"
     }
    ]
   },
@@ -141,13 +141,13 @@
      "platform": "skyscanner",
      "kind": "fallback",
      "url": "https://www.skyscanner.com.tw/",
-     "label": "前往 Skyscanner（需自行確認航線與日期）"
+     "label": "前往 Skyscanner 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"
     },
     {
      "platform": "tripcom",
      "kind": "fallback",
      "url": "https://tw.trip.com/flights/",
-     "label": "前往 Trip.com（需自行確認航線與日期）"
+     "label": "前往 Trip.com 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"
     },
     {
      "platform": "aviasales",
@@ -159,7 +159,7 @@
      "platform": "google",
      "kind": "fallback",
      "url": "https://www.google.com/travel/flights?hl=zh-TW",
-     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+     "label": "前往 Google 航班 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"
     }
    ]
   },
@@ -185,13 +185,13 @@
      "platform": "aviasales",
      "kind": "fallback",
      "url": "https://www.aviasales.com/?marker=000000",
-     "label": "前往 Aviasales（票價來源・聯盟連結・英文介面・需自行確認航線與日期）"
+     "label": "前往 Aviasales 一般搜尋頁（票價來源・聯盟連結・英文介面；未帶入行程，請自行輸入並確認航線與日期）"
     },
     {
      "platform": "google",
      "kind": "fallback",
      "url": "https://www.google.com/travel/flights?hl=zh-TW",
-     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+     "label": "前往 Google 航班 一般搜尋頁（未帶入行程，請自行輸入並確認航線與日期）"
     }
    ]
   }

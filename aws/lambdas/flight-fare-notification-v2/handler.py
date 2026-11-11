@@ -45,19 +45,21 @@ def deps():
 
 
 def link_deps(env, log=print):
-    """Search-link inputs (spec docs/m1.4-multi-platform-search-links.md). A bad bundled config
-    disables the links section, never the email. The marker is never logged."""
+    """Search-link inputs (spec docs/m1.4-multi-platform-search-links.md). A bad bundled config or
+    a missing/invalid TP_MARKER blocks reference-fare emails (service.render); the M1 template is
+    unaffected. TP_MARKER is the public Travelpayouts partner ID, not the API token, and is never
+    logged."""
     try:
         out = {"links_config": searchlinks.load_config(), "catalog": searchlinks.load_catalog()}
     except (OSError, ValueError, KeyError, TypeError) as e:
-        log(f"links: disabled ({type(e).__name__})")
+        log(f"links: ERROR config unavailable ({type(e).__name__}); reference-fare emails will be blocked")
         out = {"links_config": None, "catalog": None}
     marker = (env.get("TP_MARKER") or "").strip() or None
-    if marker is not None and not searchlinks.valid_marker(marker):
-        log("links: TP_MARKER has an unexpected format; affiliate and third-party links disabled")
+    if not searchlinks.valid_marker(marker):
+        # The value is never logged: only whether it was set.
+        log("links: ERROR TP_MARKER " + ("has an unexpected format" if marker else "is not set")
+            + "; reference-fare emails will be blocked (EMAIL_TEMPLATE=reference)")
         marker = None
-    elif marker is None:
-        log("links: TP_MARKER not set; only the plain Aviasales link is shown")
     out["marker"] = marker
     return out
 
