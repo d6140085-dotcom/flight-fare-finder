@@ -1,8 +1,11 @@
 """Email content and Resend delivery.
 
 render() and booking_url() are the M1 functions unchanged (a parity test compares them with the
-M1 Lambda): Phase 2B-1 changes deduplication only. The wording and search-link changes of the
-search-links spec are Phase 2B-2. send() adds Resend's Idempotency-Key header, so a message that
+M1 Lambda); they remain available as EMAIL_TEMPLATE=m1 for rollback. render_reference() is the
+Phase 2B-2 email of the search-links spec (§2.1, §5): reference-fare wording with Aviasales named
+as the source, 「約 NT$」, multi-platform search links, disclaimer and affiliate disclosure, and no
+「立即訂購」. It refuses (AffiliateLinkUnavailable) unless a labelled Aviasales affiliate link is
+present, because Travelpayouts' permission to show Data API fares requires one. send() adds Resend's Idempotency-Key header, so a message that
 is redelivered after a crash between "sent" and "recorded" doesn't send a second email within
 Resend's 24-hour key window.
 """
@@ -34,6 +37,63 @@ def render(m, cities, airlines):
     body = "".join(f"<p>{html.escape(x)}</p>" for x in lines)
     page = f'<h2>{html.escape(subject)}</h2>{body}<p><a href="{html.escape(url)}">立即訂購</a></p>'
     return subject, page, "\n".join(lines + ["立即訂購：" + url])
+
+
+DISCLAIMER = ("參考票價來自 Aviasales（經 Travelpayouts 取得），已換算為新台幣，金額為約略值，可能已變動。"
+              "各平台顯示的價格與可訂位情況可能不同，實際價格以訂購網站為準。")
+FALLBACK_NOTICE = "未帶入行程，請自行輸入並確認航線與日期"   # searchlinks.FALLBACK_NOTICE (a test keeps them equal)
+FALLBACK_LINE = ("標示「一般搜尋頁」的連結只會開啟該網站的搜尋頁，不會帶入此行程：請自行輸入並確認出發地、目的地與來回日期。"
+                 "各平台的價格可能與 Aviasales 參考票價不同。")
+AFFILIATE_DISCLOSURE = "本服務可能因你透過 Aviasales 連結訂購而獲得佣金。"
+BUTTON = {"primary": "display:inline-block;padding:10px 16px;margin:4px 0;background:#0b57d0;color:#ffffff;"
+                     "border-radius:6px;text-decoration:none;font-weight:bold",
+          "secondary": "display:inline-block;padding:10px 16px;margin:4px 0;background:#ffffff;color:#0b57d0;"
+                       "border:1px solid #0b57d0;border-radius:6px;text-decoration:none"}
+
+
+class AffiliateLinkUnavailable(Exception):
+    """The reference-fare email can't carry a labelled Aviasales affiliate link: don't send it.
+    `reason` is a data-free code, safe to log."""
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _nt(value):
+    return f"約 NT${value:,}"
+
+
+def render_reference(m, cities, airlines, links):
+    """Phase 2B-2 email. `links` is a searchlinks.LinkSet. Raises AffiliateLinkUnavailable unless
+    it holds a labelled Aviasales affiliate link (Travelpayouts condition 3): Data API reference
+    fares are never shown without one, and never next to a plain Aviasales link."""
+    shown = list(links.links) if links is not None else []
+    av = [link for link in shown if link.platform == "aviasales"]
+    if not (len(av) == 1 and av[0].affiliate and "marker=" in av[0].url):
+        raise AffiliateLinkUnavailable(",".join(getattr(links, "reasons", ()) or ()) or "no_affiliate_link")
+    o, d = (cities.get(c, c) for c in m["route"].split("-"))
+    f, usd, target = m["cheapest"], m.get("cheapest_usd"), m["target_price"]
+    reached = "已低於你的目標價" if f["price"] < target else "已達你的目標價"
+    subject = f"✈️ {o} → {d} 參考票價 {_nt(f['price'])}（{reached}）"
+    day = lambda k: (f.get(k) or "")[:10] or "未提供"
+    al = f.get("airline")
+    lines = [f"參考票價（來源：Aviasales）：{_nt(f['price'])}" + (f"（約 US${usd['price']:,}）" if usd else ""),
+             f"你的目標價：NT${target:,}", f"去程 {day('depart_date')}  回程 {day('return_date')}（來回）"]
+    if al:
+        lines.append("航空公司：" + (f"{airlines[al]}（{al}）" if al in airlines else al))
+    if any(link.kind != "itinerary" for link in shown):
+        lines.append(FALLBACK_LINE)
+    notes = [DISCLAIMER, AFFILIATE_DISCLOSURE]
+    esc = html.escape
+    parts = [f"<h2>{esc(subject)}</h2>"] + [f"<p>{esc(x)}</p>" for x in lines]
+    for link in shown:
+        style = BUTTON.get(link.role) if link.kind == "itinerary" else None
+        attrs = f' href="{esc(link.url)}" target="_blank" rel="noopener noreferrer"'
+        parts.append(f'<p><a{attrs} style="{style}">{esc(link.label)}</a></p>' if style
+                     else f"<p><a{attrs}>{esc(link.label)}</a></p>")
+    parts += [f'<p style="color:#555555;font-size:12px">{esc(x)}</p>' for x in notes]
+    text = lines + [""] + [f"{link.label}：{link.url}" for link in shown] + [""] + notes
+    return subject, "".join(parts), "\n".join(text)
 
 
 SENT, RETRY, UNKNOWN, DROP, DUPLICATE = "sent", "retry", "unknown", "drop", "duplicate"

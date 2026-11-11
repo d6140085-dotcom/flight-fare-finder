@@ -3,6 +3,8 @@
 Outcomes (logged with a subscriber hash, never an address):
   skipped:<reason>  nothing sent, message done (deduped, duplicate, paused, expired, ...)
   sent / sent:duplicate_key / sent:claim_lost
+  blocked:<reason>  reference-fare email without a valid Aviasales affiliate link (missing or
+                    invalid TP_MARKER, bad link config): nothing sent, nothing recorded, message done
   dropped:<reason>  permanent problem (invalid message, Resend 4xx), message done
   Retry exception   message returned to SQS (claim held by another worker, Resend 429/5xx/409
                     concurrent, network), as M1's partial-batch retry
@@ -12,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from . import history, keys, mailer, months, rules
+from . import history, keys, mailer, months, rules, searchlinks
 from .history import ClaimConflict
 
 
@@ -31,6 +33,33 @@ class Deps:
     cities: dict = None
     airlines: dict = None
     log: object = print
+    links_config: dict = None     # validated search-platforms.json, or None: no links section
+    catalog: object = None        # searchlinks.Catalog, or None: no links section
+    marker: str = None            # Aviasales marker (TP_MARKER, deploy time); None: plain Aviasales link only
+
+
+def search_links(m, now, deps):
+    """The fare's search links. Any problem becomes AffiliateLinkUnavailable with a data-free
+    reason: the reference-fare email is then not sent (Travelpayouts condition 3)."""
+    if deps.links_config is None or deps.catalog is None:
+        raise mailer.AffiliateLinkUnavailable("links_config_unavailable")
+    o, d = m["route"].split("-")
+    f = m["cheapest"]
+    try:
+        return searchlinks.build(o, d, f.get("depart_date"), f.get("return_date"), months.today(now),
+                                 catalog=deps.catalog, config=deps.links_config, marker=deps.marker)
+    except Exception as e:              # noqa: BLE001 - never send the reference fare without the link
+        raise mailer.AffiliateLinkUnavailable(f"link_builder_error:{type(e).__name__}") from None
+
+
+def render(m, now, deps, t):
+    """(subject, html, text). Raises mailer.AffiliateLinkUnavailable for a blocked reference email."""
+    if deps.settings.email_template == "m1":
+        return mailer.render(m, deps.cities or {}, deps.airlines or {})
+    links = search_links(m, now, deps)
+    if links.reasons:
+        deps.log(f"{t}: links: {','.join(links.reasons)}")
+    return mailer.render_reference(m, deps.cities or {}, deps.airlines or {}, links)
 
 
 def tag(email, route):
@@ -146,6 +175,13 @@ def process(m, delivery_id, now, deps, enqueued_at=None):
         deps.log(f"{t}: skipped (deduped)")
         return "skipped:deduped"
     try:
+        # Rendered before any history write: a blocked email leaves no claim and no "sent" record.
+        subject, page, text = render(m, now, deps, t)
+    except mailer.AffiliateLinkUnavailable as e:
+        deps.log(f"{t}: BLOCKED {e.reason} (reference-fare email needs the labelled Aviasales affiliate "
+                 "link; nothing sent or recorded; check TP_MARKER and search-platforms.json)")
+        return f"blocked:{e.reason}"
+    try:
         deps.history.claim(pk, state, eid, now, deps.settings.claim_seconds)
     except ClaimConflict:
         raise Retry(f"{t}: stream changed or claimed concurrently") from None
@@ -161,7 +197,6 @@ def process(m, delivery_id, now, deps, enqueued_at=None):
                                 email=email, dual_write=deps.settings.legacy_dual_write)
             deps.log(f"{t}: recorded unconfirmed earlier attempt ({reason})")
             return "recorded:unconfirmed"
-        subject, page, text = mailer.render(m, deps.cities or {}, deps.airlines or {})
         kw = {"opener": deps.opener} if deps.opener else {}
         status, outcome, err = mailer.send(deps.resend_cfg(), email, subject, page, text, keys.idempotency_key(eid), **kw)
     except BaseException:
