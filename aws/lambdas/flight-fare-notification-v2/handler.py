@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import boto3
 
-from notify2 import config, history, keys, service
+from notify2 import config, history, keys, searchlinks, service
 
 _ssm = boto3.client("ssm")
 _ddb = boto3.resource("dynamodb")
@@ -39,8 +39,27 @@ def deps():
             pepper=_param(settings.pepper_param),          # fail closed: no pepper -> exception -> retry
             resend_cfg=resend_cfg,
             subscriptions=_ddb.Table("subscriptions") if settings.recheck_subscription else None,
-            cities=json.loads(os.environ.get("CITIES") or "{}"), airlines=json.loads(os.environ.get("AIRLINES") or "{}"))
+            cities=json.loads(os.environ.get("CITIES") or "{}"), airlines=json.loads(os.environ.get("AIRLINES") or "{}"),
+            **link_deps(os.environ))
     return _deps
+
+
+def link_deps(env, log=print):
+    """Search-link inputs (spec docs/m1.4-multi-platform-search-links.md). A bad bundled config
+    disables the links section, never the email. The marker is never logged."""
+    try:
+        out = {"links_config": searchlinks.load_config(), "catalog": searchlinks.load_catalog()}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log(f"links: disabled ({type(e).__name__})")
+        out = {"links_config": None, "catalog": None}
+    marker = (env.get("TP_MARKER") or "").strip() or None
+    if marker is not None and not searchlinks.valid_marker(marker):
+        log("links: TP_MARKER has an unexpected format; affiliate and third-party links disabled")
+        marker = None
+    elif marker is None:
+        log("links: TP_MARKER not set; only the plain Aviasales link is shown")
+    out["marker"] = marker
+    return out
 
 
 RESERVE_MS = 15_000   # stop starting new messages when less than this is left (Resend timeout 10 s + DB)

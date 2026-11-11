@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from . import history, keys, mailer, months, rules
+from . import history, keys, mailer, months, rules, searchlinks
 from .history import ClaimConflict
 
 
@@ -31,6 +31,32 @@ class Deps:
     cities: dict = None
     airlines: dict = None
     log: object = print
+    links_config: dict = None     # validated search-platforms.json, or None: no links section
+    catalog: object = None        # searchlinks.Catalog, or None: no links section
+    marker: str = None            # Aviasales marker (TP_MARKER, deploy time); None: plain Aviasales link only
+
+
+def search_links(m, now, deps, t):
+    """The fare's search links, or None. Never raises: the email doesn't depend on links (spec §6)."""
+    if deps.links_config is None or deps.catalog is None:
+        return None
+    o, d = m["route"].split("-")
+    f = m["cheapest"]
+    try:
+        links = searchlinks.build(o, d, f.get("depart_date"), f.get("return_date"), months.today(now),
+                                  catalog=deps.catalog, config=deps.links_config, marker=deps.marker)
+    except Exception as e:              # noqa: BLE001 - spec §6: send without the links section
+        deps.log(f"{t}: links: error {type(e).__name__}")
+        return None
+    if links.reasons:
+        deps.log(f"{t}: links: {','.join(links.reasons)}")
+    return links
+
+
+def render(m, now, deps, t):
+    if deps.settings.email_template == "m1":
+        return mailer.render(m, deps.cities or {}, deps.airlines or {})
+    return mailer.render_reference(m, deps.cities or {}, deps.airlines or {}, search_links(m, now, deps, t))
 
 
 def tag(email, route):
@@ -161,7 +187,7 @@ def process(m, delivery_id, now, deps, enqueued_at=None):
                                 email=email, dual_write=deps.settings.legacy_dual_write)
             deps.log(f"{t}: recorded unconfirmed earlier attempt ({reason})")
             return "recorded:unconfirmed"
-        subject, page, text = mailer.render(m, deps.cities or {}, deps.airlines or {})
+        subject, page, text = render(m, now, deps, t)
         kw = {"opener": deps.opener} if deps.opener else {}
         status, outcome, err = mailer.send(deps.resend_cfg(), email, subject, page, text, keys.idempotency_key(eid), **kw)
     except BaseException:

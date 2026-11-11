@@ -1,0 +1,199 @@
+{
+ "_comment": "Golden vectors for the search-link builders (spec §7.1 L01). Shared by the Python tests and, in Phase 3, the TypeScript tests. `marker` is an obvious test value, never a real Partner ID.",
+ "today": "2026-11-11",
+ "marker": "000000",
+ "cases": [
+  {
+   "origin": "TPE",
+   "destination": "TYO",
+   "depart_date": "2026-12-11",
+   "return_date": "2026-12-18",
+   "links": [
+    {
+     "platform": "skyscanner",
+     "kind": "itinerary",
+     "url": "https://www.skyscanner.com.tw/transport/flights/tpe/tyo/261211/261218/?adultsv2=1&cabinclass=economy&market=TW&locale=zh-TW&currency=TWD",
+     "label": "在 Skyscanner 搜尋此行程"
+    },
+    {
+     "platform": "tripcom",
+     "kind": "itinerary",
+     "url": "https://tw.trip.com/flights/showfarefirst?dcity=tpe&acity=tyo&ddate=2026-12-11&rdate=2026-12-18&triptype=rt&class=y&quantity=1&locale=zh-TW&curr=TWD",
+     "label": "在 Trip.com 搜尋此行程"
+    },
+    {
+     "platform": "aviasales",
+     "kind": "itinerary",
+     "url": "https://www.aviasales.com/search/TPE1112TYO18121?marker=000000",
+     "label": "在 Aviasales 搜尋此行程（票價來源・聯盟連結・英文介面）"
+    },
+    {
+     "platform": "google",
+     "kind": "fallback",
+     "url": "https://www.google.com/travel/flights?hl=zh-TW",
+     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+    }
+   ]
+  },
+  {
+   "origin": "RMQ",
+   "destination": "OKA",
+   "depart_date": "2026-12-11",
+   "return_date": "2026-12-18",
+   "links": [
+    {
+     "platform": "skyscanner",
+     "kind": "itinerary",
+     "url": "https://www.skyscanner.com.tw/transport/flights/rmq/oka/261211/261218/?adultsv2=1&cabinclass=economy&market=TW&locale=zh-TW&currency=TWD",
+     "label": "在 Skyscanner 搜尋此行程"
+    },
+    {
+     "platform": "tripcom",
+     "kind": "itinerary",
+     "url": "https://tw.trip.com/flights/showfarefirst?dcity=rmq&acity=oka&ddate=2026-12-11&rdate=2026-12-18&triptype=rt&class=y&quantity=1&locale=zh-TW&curr=TWD",
+     "label": "在 Trip.com 搜尋此行程"
+    },
+    {
+     "platform": "aviasales",
+     "kind": "itinerary",
+     "url": "https://www.aviasales.com/search/RMQ1112OKA18121?marker=000000",
+     "label": "在 Aviasales 搜尋此行程（票價來源・聯盟連結・英文介面）"
+    },
+    {
+     "platform": "google",
+     "kind": "fallback",
+     "url": "https://www.google.com/travel/flights?hl=zh-TW",
+     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+    }
+   ]
+  },
+  {
+   "origin": "KHH",
+   "destination": "OKA",
+   "depart_date": "2027-01-30",
+   "return_date": "2027-02-02",
+   "links": [
+    {
+     "platform": "skyscanner",
+     "kind": "fallback",
+     "url": "https://www.skyscanner.com.tw/",
+     "label": "前往 Skyscanner（需自行確認航線與日期）"
+    },
+    {
+     "platform": "tripcom",
+     "kind": "itinerary",
+     "url": "https://tw.trip.com/flights/showfarefirst?dcity=khh&acity=oka&ddate=2027-01-30&rdate=2027-02-02&triptype=rt&class=y&quantity=1&locale=zh-TW&curr=TWD",
+     "label": "在 Trip.com 搜尋此行程"
+    },
+    {
+     "platform": "aviasales",
+     "kind": "itinerary",
+     "url": "https://www.aviasales.com/search/KHH3001OKA02021?marker=000000",
+     "label": "在 Aviasales 搜尋此行程（票價來源・聯盟連結・英文介面）"
+    },
+    {
+     "platform": "google",
+     "kind": "fallback",
+     "url": "https://www.google.com/travel/flights?hl=zh-TW",
+     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+    }
+   ]
+  },
+  {
+   "origin": "KHH",
+   "destination": "TYO",
+   "depart_date": "2026-12-31",
+   "return_date": "2027-01-04",
+   "links": [
+    {
+     "platform": "skyscanner",
+     "kind": "fallback",
+     "url": "https://www.skyscanner.com.tw/",
+     "label": "前往 Skyscanner（需自行確認航線與日期）"
+    },
+    {
+     "platform": "tripcom",
+     "kind": "itinerary",
+     "url": "https://tw.trip.com/flights/showfarefirst?dcity=khh&acity=tyo&ddate=2026-12-31&rdate=2027-01-04&triptype=rt&class=y&quantity=1&locale=zh-TW&curr=TWD",
+     "label": "在 Trip.com 搜尋此行程"
+    },
+    {
+     "platform": "aviasales",
+     "kind": "itinerary",
+     "url": "https://www.aviasales.com/search/KHH3112TYO04011?marker=000000",
+     "label": "在 Aviasales 搜尋此行程（票價來源・聯盟連結・英文介面）"
+    },
+    {
+     "platform": "google",
+     "kind": "fallback",
+     "url": "https://www.google.com/travel/flights?hl=zh-TW",
+     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+    }
+   ]
+  },
+  {
+   "origin": "TPE",
+   "destination": "LON",
+   "depart_date": "2027-03-01",
+   "return_date": "2027-03-15",
+   "links": [
+    {
+     "platform": "skyscanner",
+     "kind": "fallback",
+     "url": "https://www.skyscanner.com.tw/",
+     "label": "前往 Skyscanner（需自行確認航線與日期）"
+    },
+    {
+     "platform": "tripcom",
+     "kind": "fallback",
+     "url": "https://tw.trip.com/flights/",
+     "label": "前往 Trip.com（需自行確認航線與日期）"
+    },
+    {
+     "platform": "aviasales",
+     "kind": "itinerary",
+     "url": "https://www.aviasales.com/search/TPE0103LON15031?marker=000000",
+     "label": "在 Aviasales 搜尋此行程（票價來源・聯盟連結・英文介面）"
+    },
+    {
+     "platform": "google",
+     "kind": "fallback",
+     "url": "https://www.google.com/travel/flights?hl=zh-TW",
+     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+    }
+   ]
+  },
+  {
+   "origin": "TPE",
+   "destination": "TYO",
+   "depart_date": "2027-10-01",
+   "return_date": "2027-11-20",
+   "links": [
+    {
+     "platform": "skyscanner",
+     "kind": "itinerary",
+     "url": "https://www.skyscanner.com.tw/transport/flights/tpe/tyo/271001/271120/?adultsv2=1&cabinclass=economy&market=TW&locale=zh-TW&currency=TWD",
+     "label": "在 Skyscanner 搜尋此行程"
+    },
+    {
+     "platform": "tripcom",
+     "kind": "itinerary",
+     "url": "https://tw.trip.com/flights/showfarefirst?dcity=tpe&acity=tyo&ddate=2027-10-01&rdate=2027-11-20&triptype=rt&class=y&quantity=1&locale=zh-TW&curr=TWD",
+     "label": "在 Trip.com 搜尋此行程"
+    },
+    {
+     "platform": "aviasales",
+     "kind": "fallback",
+     "url": "https://www.aviasales.com/?marker=000000",
+     "label": "前往 Aviasales（票價來源・聯盟連結・英文介面・需自行確認航線與日期）"
+    },
+    {
+     "platform": "google",
+     "kind": "fallback",
+     "url": "https://www.google.com/travel/flights?hl=zh-TW",
+     "label": "在 Google 航班自行搜尋（需手動輸入航線與日期）"
+    }
+   ]
+  }
+ ]
+}

@@ -73,13 +73,14 @@ Lambda's deduplication with month-aware streams (subscriber, route, departure mo
 claim/commit and a Resend idempotency key, keeping the M1 rule within each stream and the M1
 email unchanged. Design, deployment steps and rollback: `docs/m1.4-phase2b1-month-dedup.md`.
 
-### Affiliate marker (not enabled)
+### Affiliate marker (not enabled on this M1 Lambda)
 
-To earn commission, add your Travelpayouts partner ID ("marker", not a secret) as
-`?marker=<id>` on the booking link, e.g. `https://www.aviasales.com/search/TPE0212TYO09121?marker=<id>`.
-Suggested wiring: a non-secret env var `TP_MARKER` on `flight-fare-notification` (set from the
-template builder), appended only when set. The Travelpayouts API token is unrelated and must
-never appear in links. Moving the code off the inline 4,096-byte deployment is needed first.
+M1 links carry no marker. Phase 2B-2 (code only, not deployed) adds it to the v2 notification
+Lambda: the Travelpayouts partner ID ("marker", not a secret but an account identifier, so never
+committed) is read from the env var `TP_MARKER` at deploy time and appended as `?marker=<id>` to
+Aviasales links only. Without a valid marker, v2 shows only the plain Aviasales link. The
+Travelpayouts API token is unrelated and must never appear in links. See
+`docs/m1.4-phase2b2-search-links.md`.
 
 While `from` is `onboarding@resend.dev`, Resend only delivers to the Resend account's own
 address (others get `403`; `example.com` addresses get `422`). Verify a domain (M3) to email anyone else.
