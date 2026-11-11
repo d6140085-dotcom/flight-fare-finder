@@ -1,4 +1,4 @@
-import { redirect, useLoaderData, useNavigate } from "react-router";
+import { Link, redirect, useLoaderData, useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { User } from "@supabase/supabase-js";
 import { LogOut } from "lucide-react";
@@ -8,6 +8,7 @@ import { SiteHeader } from "@/components/SiteHeader";
 import { PlanCard } from "@/components/PlanCard";
 import { PLANS, listSubscriptions, saveSubscription, type Subscription } from "@/lib/flight-api";
 import { usePageMeta } from "@/lib/page-meta";
+import { M14_APP_PATH, M14_PROTOTYPE_ENABLED } from "@/lib/m14/routes";
 
 // Runs in the browser before /app renders (replaces TanStack Router's beforeLoad).
 export async function appLoader() {
@@ -69,6 +70,11 @@ export default function AppPage() {
           <p className="mt-2 text-muted-foreground">
             Pick a route and a target price. We email you when the fare reaches it.
           </p>
+          {M14_PROTOTYPE_ENABLED && (
+            <Button asChild variant="outline" className="mt-6">
+              <Link to={`/${M14_APP_PATH}`}>試用自訂航線訂閱（開發預覽・模擬資料）</Link>
+            </Button>
+          )}
         </div>
 
         {subsQuery.isPending ? (

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { CircleAlert, Info, Pause, Pencil, Play, Plane, RotateCcw, Trash2 } from "lucide-react";
 import {
   AlertDialog,
@@ -34,7 +34,12 @@ interface SubscriptionItemProps {
   now: Date;
   /** What the latest fare check says (prototype: demo data). */
   fare: FareDisplay;
-  onEdit: (value: Validated) => void;
+  /** Extra fare details under the fare line (last checked time, search links). */
+  fareDetails?: ReactNode;
+  /** A request for this row is in flight: actions are disabled. */
+  busy?: boolean;
+  /** May return a promise; resolving to false keeps the edit form open. */
+  onEdit: (value: Validated) => void | boolean | Promise<boolean>;
   onPause: () => void;
   onResume: () => void;
   onDelete: () => void;
@@ -45,6 +50,8 @@ export function SubscriptionItem({
   subs,
   now,
   fare,
+  fareDetails,
+  busy = false,
   onEdit,
   onPause,
   onResume,
@@ -93,13 +100,14 @@ export function SubscriptionItem({
             )}
             <span>{fare.text}</span>
           </p>
+          {fareDetails}
           {status === "expired" && (
             <p className="mt-1 text-sm text-destructive">
               請選擇新的出發月份以重新啟用（仍佔用 1 筆訂閱額度）。
             </p>
           )}
         </div>
-        <Badge variant={STATUS[status].variant} className="self-start">
+        <Badge variant={STATUS[status].variant} className="shrink-0 self-start whitespace-nowrap">
           {STATUS[status].label}
         </Badge>
       </div>
@@ -111,9 +119,11 @@ export function SubscriptionItem({
             now={now}
             editing={sub}
             submitLabel="儲存變更"
-            onSubmit={(value) => {
-              onEdit(value);
-              setEditing(false);
+            busy={busy}
+            onSubmit={async (value) => {
+              const ok = await onEdit(value);
+              if (ok !== false) setEditing(false);
+              return ok !== false;
             }}
             onCancel={() => setEditing(false)}
           />
@@ -121,20 +131,20 @@ export function SubscriptionItem({
       ) : (
         <div className="mt-4 flex flex-wrap gap-2">
           {status === "expired" ? (
-            <Button size="sm" onClick={() => setEditing(true)}>
+            <Button size="sm" onClick={() => setEditing(true)} disabled={busy}>
               <RotateCcw className="h-4 w-4" /> 重新啟用
             </Button>
           ) : (
             <>
-              <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+              <Button size="sm" variant="outline" onClick={() => setEditing(true)} disabled={busy}>
                 <Pencil className="h-4 w-4" /> 編輯
               </Button>
               {sub.alerts_paused ? (
-                <Button size="sm" variant="outline" onClick={onResume}>
+                <Button size="sm" variant="outline" onClick={onResume} disabled={busy}>
                   <Play className="h-4 w-4" /> 恢復追蹤
                 </Button>
               ) : (
-                <Button size="sm" variant="outline" onClick={onPause}>
+                <Button size="sm" variant="outline" onClick={onPause} disabled={busy}>
                   <Pause className="h-4 w-4" /> 暫停追蹤
                 </Button>
               )}
@@ -142,7 +152,7 @@ export function SubscriptionItem({
           )}
           <AlertDialog>
             <AlertDialogTrigger asChild>
-              <Button size="sm" variant="outline" className="text-destructive">
+              <Button size="sm" variant="outline" className="text-destructive" disabled={busy}>
                 <Trash2 className="h-4 w-4" /> 刪除
               </Button>
             </AlertDialogTrigger>

@@ -31,11 +31,25 @@ interface RouteFormProps {
   /** Present when editing an existing subscription. */
   editing?: RouteSubscription;
   submitLabel: string;
-  onSubmit: (value: Validated) => void;
+  /** May return a promise; resolving to false (a server-side failure) keeps the form as typed. */
+  onSubmit: (value: Validated) => void | boolean | Promise<boolean>;
   onCancel?: () => void;
+  /** Disables the form while a request is in flight. */
+  busy?: boolean;
+  /** Disables submitting (for example when the subscription limit is reached). */
+  disabled?: boolean;
 }
 
-export function RouteForm({ subs, now, editing, submitLabel, onSubmit, onCancel }: RouteFormProps) {
+export function RouteForm({
+  subs,
+  now,
+  editing,
+  submitLabel,
+  onSubmit,
+  onCancel,
+  busy = false,
+  disabled = false,
+}: RouteFormProps) {
   const id = useId();
   const months = selectableMonths(now);
   const [origin, setOrigin] = useState(editing?.origin ?? "");
@@ -54,8 +68,9 @@ export function RouteForm({ subs, now, editing, submitLabel, onSubmit, onCancel 
       ? editing.departure_month
       : null;
 
-  function submit(e: FormEvent) {
+  async function submit(e: FormEvent) {
     e.preventDefault();
+    if (busy || disabled) return;
     const input = { origin, destination, month, targetText };
     const result = validate(subs, input, editing ? { editing, now } : { now });
     if (!result.ok) {
@@ -63,8 +78,8 @@ export function RouteForm({ subs, now, editing, submitLabel, onSubmit, onCancel 
       return;
     }
     setErrors([]);
-    onSubmit(result.value);
-    if (!editing) {
+    const ok = await onSubmit(result.value);
+    if (ok !== false && !editing) {
       setOrigin("");
       setDestination("");
       setMonth(months[0] ?? "");
@@ -166,9 +181,11 @@ export function RouteForm({ subs, now, editing, submitLabel, onSubmit, onCancel 
       )}
 
       <div className="flex flex-wrap gap-2">
-        <Button type="submit">{submitLabel}</Button>
+        <Button type="submit" disabled={busy || disabled} aria-busy={busy}>
+          {busy ? "處理中…" : submitLabel}
+        </Button>
         {onCancel && (
-          <Button type="button" variant="outline" onClick={onCancel}>
+          <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
             取消
           </Button>
         )}
