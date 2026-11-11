@@ -68,6 +68,11 @@ plus search links to Skyscanner Taiwan, Trip.com Taiwan, Aviasales and Google Fl
 price disclaimer — see [Multi-Platform Flight Search Links](../docs/m1.4-multi-platform-search-links.md).
 The message format the Lambda reads does not change.
 
+Phase 2B-1 (code only, not deployed): `aws/lambdas/flight-fare-notification-v2/` replaces this
+Lambda's deduplication with month-aware streams (subscriber, route, departure month), atomic
+claim/commit and a Resend idempotency key, keeping the M1 rule within each stream and the M1
+email unchanged. Design, deployment steps and rollback: `docs/m1.4-phase2b1-month-dedup.md`.
+
 ### Affiliate marker (not enabled)
 
 To earn commission, add your Travelpayouts partner ID ("marker", not a secret) as

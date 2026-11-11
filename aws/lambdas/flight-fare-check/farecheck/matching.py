@@ -48,9 +48,15 @@ def match(rows, item, offer, as_of, catalog):
     return matched, skipped
 
 
-def message_body(row, item, offer, usd_offer):
+def message_body(row, item, offer, usd_offer, as_of=None):
+    """M1 shape. With `as_of` (NOTIFY_MESSAGE_VERSION=2) two fields are appended: the scheduler's
+    resolved `month` and `as_of`, which the v2 notification Lambda uses for month-aware dedup.
+    The M1 notification Lambda ignores unknown fields, so v2 messages are safe for it too."""
     body = {"email": row["email"], "route": item.route, "plan_name": row.get("plan_name"),
             "target_price": int(target_of(row)), "cheapest": offer.message_dict()}
     if usd_offer:
         body["cheapest_usd"] = usd_offer.message_dict()
+    if as_of is not None:
+        body["month"] = item.month
+        body["as_of"] = workitems.iso_utc(as_of)
     return body
