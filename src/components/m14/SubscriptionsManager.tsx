@@ -2,23 +2,21 @@ import { useState } from "react";
 import { Link } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { CircleAlert, Clock, Loader2, RefreshCw } from "lucide-react";
+import { CircleAlert, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RouteForm } from "@/components/m14/RouteForm";
-import { SearchLinks } from "@/components/m14/SearchLinks";
+import { AFFILIATE_DISCLOSURE, SHORT_DISCLAIMER, SearchLinks } from "@/components/m14/SearchLinks";
 import { SubscriptionItem } from "@/components/m14/SubscriptionItem";
 import {
   ApiError,
   apiErrorMessage,
   type ListResponse,
   type PatchRequest,
-  type SubscriptionDto,
   type SubscriptionsClient,
 } from "@/lib/m14/api";
 import { routeLabel } from "@/lib/m14/catalog";
-import { checkedAtLabel } from "@/lib/m14/fare-status";
-import { fareView, type FareView } from "@/lib/m14/fare-view";
+import { fareView } from "@/lib/m14/fare-view";
 import type { Validated } from "@/lib/m14/subscriptions";
 
 interface SubscriptionsManagerProps {
@@ -32,34 +30,6 @@ interface SubscriptionsManagerProps {
    * (Travelpayouts condition 3, docs/m1.4-phase2b2-search-links.md §2.3).
    */
   marker: string | null;
-}
-
-function FareDetails({
-  sub,
-  view,
-  demoMarker,
-}: {
-  sub: SubscriptionDto;
-  view: FareView;
-  demoMarker: boolean;
-}) {
-  const check = sub.fare_check;
-  return (
-    <>
-      {view.fare.checkedAt && (
-        <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          {checkedAtLabel(view.fare.checkedAt)}
-        </p>
-      )}
-      {view.links && check?.kind === "ok" && check.depart_date && check.return_date && (
-        <p className="mt-1 text-sm">
-          參考行程：去程 {check.depart_date} 回程 {check.return_date}（來回）
-        </p>
-      )}
-      {view.links && <SearchLinks links={view.links} demoMarker={demoMarker} />}
-    </>
-  );
 }
 
 export function SubscriptionsManager({
@@ -225,6 +195,22 @@ export function SubscriptionsManager({
           </p>
         </div>
 
+        <div
+          aria-label="參考票價說明"
+          role="note"
+          className="mb-4 space-y-1 rounded-xl border border-border bg-card/60 p-3 text-xs text-muted-foreground"
+        >
+          <p>{SHORT_DISCLAIMER}</p>
+          <p>{AFFILIATE_DISCLOSURE}</p>
+          <p>每條航線目前只能追蹤一個出發月份；想改月份，請編輯既有的訂閱。</p>
+          {demoMarker && (
+            <p className="font-medium text-foreground">
+              開發預覽：Aviasales
+              連結使用測試用標記（marker=000000），不是正式聯盟連結，請勿用於正式訂購。
+            </p>
+          )}
+        </div>
+
         {writeError && (
           <p
             role="alert"
@@ -250,7 +236,10 @@ export function SubscriptionsManager({
                   subs={subs}
                   now={today}
                   fare={view.fare}
-                  fareDetails={<FareDetails sub={sub} view={view} demoMarker={demoMarker} />}
+                  price={view.price}
+                  comparison={view.comparison}
+                  itinerary={view.itinerary}
+                  links={view.links ? <SearchLinks links={view.links} /> : null}
                   busy={busyRoute === sub.route}
                   onEdit={(value) => {
                     const patch: PatchRequest = { if_updated_at: sub.updated_at };

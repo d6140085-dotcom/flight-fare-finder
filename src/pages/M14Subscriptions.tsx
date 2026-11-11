@@ -7,8 +7,11 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/SiteHeader";
 import { SubscriptionsManager } from "@/components/m14/SubscriptionsManager";
-import { MOCK_SCENARIOS, MockSubscriptionsClient, type MockScenario } from "@/lib/m14/mock-client";
+import { createSubscriptionsClient } from "@/lib/m14/client-factory";
+import { MOCK_SCENARIOS, type MockScenario } from "@/lib/m14/mock-client";
 import { usePageMeta } from "@/lib/page-meta";
+import { mockDataAllowed } from "@/lib/m14/routes";
+import { NotFoundPage } from "./RootLayout";
 
 /** Test-only Aviasales marker for mock mode. Never this project's partner ID. */
 export const DEMO_MARKER = "000000";
@@ -27,7 +30,16 @@ interface M14SubscriptionsProps {
  * Vercel preview builds only (the route is compiled in only when VITE_M14_PROTOTYPE is "true");
  * it never calls the subscriptions API, AWS or the fare check.
  */
-export default function M14Subscriptions({
+/**
+ * Defence in depth: the routes exist only in preview builds, and even if this page were reached
+ * in another build it renders the 404 page and never creates mock data.
+ */
+export default function M14Subscriptions(props: M14SubscriptionsProps) {
+  if (!mockDataAllowed()) return <NotFoundPage />;
+  return <M14SubscriptionsPage {...props} />;
+}
+
+function M14SubscriptionsPage({
   mode,
   now = () => new Date(),
   latencyMs = 400,
@@ -42,8 +54,8 @@ export default function M14Subscriptions({
   const user = mode === "app" ? loader?.user : undefined;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [client] = useState(
-    () => new MockSubscriptionsClient({ now, latencyMs, scenario: initialScenario }),
+  const [client] = useState(() =>
+    createSubscriptionsClient({ now, latencyMs, scenario: initialScenario }),
   );
   const [scenario, setScenario] = useState<MockScenario>(initialScenario);
 

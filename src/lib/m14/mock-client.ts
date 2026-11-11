@@ -4,6 +4,7 @@
 // route changes, optimistic concurrency on updated_at, and derived status/effective month.
 // It never calls fetch, Supabase or AWS, and every row and fare is fake demo data.
 import { POLICY, airport, routeKey } from "./catalog";
+import { mockDataAllowed } from "./routes";
 import type { FareCheck } from "./fare-status";
 import { addMonths, currentMonth, effectiveMonth, selectableMonths } from "./months";
 import {
@@ -153,6 +154,10 @@ export class MockSubscriptionsClient implements SubscriptionsClient {
   private clock = 0;
 
   constructor(opts: MockOptions = {}) {
+    // Defence in depth: production builds never construct the mock, even if some code path
+    // tried to. Nothing here is persisted (no storage, no network): state lives in this object.
+    if (!mockDataAllowed())
+      throw new Error("Mock subscription data is not available in this build.");
     this.now = opts.now ?? (() => new Date());
     this.latencyMs = opts.latencyMs ?? 0;
     this.scenario = opts.scenario ?? "demo";

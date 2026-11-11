@@ -1,5 +1,15 @@
 import { useState, type ReactNode } from "react";
-import { CircleAlert, Info, Pause, Pencil, Play, Plane, RotateCcw, Trash2 } from "lucide-react";
+import {
+  CircleAlert,
+  Clock,
+  Info,
+  Pause,
+  Pencil,
+  Play,
+  Plane,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -13,9 +23,10 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { placeLabel, routeLabel, routeLabelEn } from "@/lib/m14/catalog";
+import { routeLabel, routeLabelEn } from "@/lib/m14/catalog";
+import { checkedAtLabel, type FareDisplay } from "@/lib/m14/fare-status";
+import type { TargetComparison } from "@/lib/m14/fare-view";
 import { effectiveMonth, monthLabel } from "@/lib/m14/months";
-import type { FareDisplay } from "@/lib/m14/fare-status";
 import { statusOf, type RouteSubscription, type Validated } from "@/lib/m14/subscriptions";
 import { cn } from "@/lib/utils";
 import { RouteForm } from "./RouteForm";
@@ -28,14 +39,28 @@ const STATUS = {
   expired: { label: "已過期", variant: "destructive" },
 } as const;
 
+/** Short value for the 參考票價 cell when no amount is shown. */
+const FARE_WORD: Record<FareDisplay["kind"], string> = {
+  ok: "暫不顯示",
+  pending: "尚未查詢",
+  no_data: "暫無資料",
+  error: "查詢失敗",
+  paused: "已暫停",
+  expired: "已過期",
+};
+
 interface SubscriptionItemProps {
   sub: RouteSubscription;
   subs: readonly RouteSubscription[];
   now: Date;
-  /** What the latest fare check says (prototype: demo data). */
+  /** What the latest fare check says. */
   fare: FareDisplay;
-  /** Extra fare details under the fare line (last checked time, search links). */
-  fareDetails?: ReactNode;
+  /** Reference amount to show (null: none, e.g. no data or no affiliate link). */
+  price?: number | null;
+  comparison?: TargetComparison | null;
+  itinerary?: { depart: string; return: string } | null;
+  /** Search links block (only for active rows with a shown reference fare). */
+  links?: ReactNode;
   /** A request for this row is in flight: actions are disabled. */
   busy?: boolean;
   /** May return a promise; resolving to false keeps the edit form open. */
@@ -45,12 +70,34 @@ interface SubscriptionItemProps {
   onDelete: () => void;
 }
 
+const md = (iso: string) => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}`;
+
+function Fact({
+  term,
+  children,
+  className,
+}: {
+  term: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={cn("min-w-0", className)}>
+      <dt className="text-xs text-muted-foreground">{term}</dt>
+      <dd className="mt-0.5 font-semibold">{children}</dd>
+    </div>
+  );
+}
+
 export function SubscriptionItem({
   sub,
   subs,
   now,
   fare,
-  fareDetails,
+  price = null,
+  comparison = null,
+  itinerary = null,
+  links,
   busy = false,
   onEdit,
   onPause,
@@ -60,57 +107,109 @@ export function SubscriptionItem({
   const [editing, setEditing] = useState(false);
   const label = routeLabel(sub.origin, sub.destination);
   const status = statusOf(sub, now);
+  const shown = fare.kind === "ok" && price !== null;
+  const problem = fare.kind === "error" || fare.kind === "expired";
 
   return (
     <li
       aria-label={label}
-      className="rounded-2xl border border-border bg-card p-5 transition-colors hover:border-primary/50 sm:p-6"
+      className="rounded-2xl border border-border bg-card p-4 transition-colors hover:border-primary/50 sm:p-6"
     >
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-lg font-semibold">
-            <Plane className="h-5 w-5 shrink-0" /> {label}
+            <Plane className="h-5 w-5 shrink-0" aria-hidden="true" /> {label}
           </h3>
-          <p className="text-sm text-muted-foreground">
-            {placeLabel(sub.origin)} → {placeLabel(sub.destination)} ·{" "}
-            {routeLabelEn(sub.origin, sub.destination)}
+          <p className="truncate text-xs text-muted-foreground">
+            {sub.origin} → {sub.destination} · {routeLabelEn(sub.origin, sub.destination)}
           </p>
-          <p className="mt-2 text-sm">
-            出發月份{" "}
-            <span className="font-semibold">
-              {sub.departure_month === null
-                ? `每月滾動（目前查詢 ${monthLabel(effectiveMonth(null, now))}）`
-                : monthLabel(sub.departure_month)}
-            </span>
-            {" · "}目標價 <span className="font-semibold">NT${twd.format(sub.target_price)}</span>
-          </p>
-          <p
-            data-fare-kind={fare.kind}
-            className={cn(
-              "mt-2 flex items-start gap-1.5 text-sm",
-              fare.kind === "error" || fare.kind === "expired"
-                ? "text-destructive"
-                : "text-muted-foreground",
-            )}
-          >
-            {fare.kind === "error" || fare.kind === "expired" ? (
-              <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-            ) : (
-              <Info className="mt-0.5 h-4 w-4 shrink-0" />
-            )}
-            <span>{fare.text}</span>
-          </p>
-          {fareDetails}
-          {status === "expired" && (
-            <p className="mt-1 text-sm text-destructive">
-              請選擇新的出發月份以重新啟用（仍佔用 1 筆訂閱額度）。
-            </p>
-          )}
         </div>
         <Badge variant={STATUS[status].variant} className="shrink-0 self-start whitespace-nowrap">
           {STATUS[status].label}
         </Badge>
       </div>
+
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+        <Fact term="出發月份">
+          {sub.departure_month === null ? (
+            <>
+              {monthLabel(effectiveMonth(null, now))}
+              <span className="block text-xs font-normal text-muted-foreground">每月滾動</span>
+            </>
+          ) : (
+            monthLabel(sub.departure_month)
+          )}
+        </Fact>
+        <Fact term="目標價">NT${twd.format(sub.target_price)}</Fact>
+        <Fact term="參考票價（來源：Aviasales）">
+          {shown ? (
+            <span className="text-primary">約 NT${twd.format(price)}</span>
+          ) : (
+            <span
+              className={cn("font-normal", problem ? "text-destructive" : "text-muted-foreground")}
+            >
+              {FARE_WORD[fare.kind]}
+            </span>
+          )}
+        </Fact>
+        <Fact term="與目標價相比">
+          {shown && comparison ? (
+            <span
+              data-comparison={comparison.kind}
+              className={comparison.kind === "above" ? "text-muted-foreground" : "text-primary"}
+            >
+              {comparison.text}
+            </span>
+          ) : (
+            <span className="font-normal text-muted-foreground">—</span>
+          )}
+        </Fact>
+      </dl>
+
+      {shown ? (
+        <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          {itinerary && (
+            <span>
+              參考行程：去程 {md(itinerary.depart)}・回程 {md(itinerary.return)}（來回）
+            </span>
+          )}
+          {fare.checkedAt && (
+            <span className="inline-flex items-center gap-1">
+              <Clock className="h-3.5 w-3.5" aria-hidden="true" />
+              {checkedAtLabel(fare.checkedAt)}
+            </span>
+          )}
+        </p>
+      ) : (
+        <div
+          data-fare-kind={fare.kind}
+          className={cn(
+            "mt-2 flex items-start gap-1.5 text-sm",
+            problem ? "text-destructive" : "text-muted-foreground",
+          )}
+        >
+          {problem ? (
+            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+          ) : (
+            <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+          )}
+          <p>
+            {fare.text}
+            {fare.checkedAt && (
+              <span className="block text-xs text-muted-foreground">
+                {checkedAtLabel(fare.checkedAt)}
+              </span>
+            )}
+          </p>
+        </div>
+      )}
+      {status === "expired" && (
+        <p className="mt-1 text-sm text-destructive">
+          請選擇新的出發月份以重新啟用（仍佔用 1 筆訂閱額度）。
+        </p>
+      )}
+
+      {links}
 
       {editing ? (
         <div className="mt-4 border-t border-border pt-4">
@@ -129,7 +228,7 @@ export function SubscriptionItem({
           />
         </div>
       ) : (
-        <div className="mt-4 flex flex-wrap gap-2">
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-border pt-3">
           {status === "expired" ? (
             <Button size="sm" onClick={() => setEditing(true)} disabled={busy}>
               <RotateCcw className="h-4 w-4" /> 重新啟用
