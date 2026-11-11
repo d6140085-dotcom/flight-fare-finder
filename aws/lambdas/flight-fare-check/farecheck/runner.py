@@ -130,7 +130,8 @@ def run_parser(event, *, settings, catalog, token, reader, now, transport=None, 
         f"{o.origin_airport or '-'}->{o.destination_airport or '-'} via {ev.record['source']}"
         + (f", {ev.usd_offer.price} USD" if ev.usd_offer else ", no USD"))
     publisher = DryRunPublisher(log) if dry_run else SqsPublisher(settings.queue_url, client_factory, dry_run)
-    bodies = [matching.message_body(r, item, o, ev.usd_offer) for r in ev.matched]
+    v2_as_of = as_of if settings.message_version == 2 else None
+    bodies = [matching.message_body(r, item, o, ev.usd_offer, v2_as_of) for r in ev.matched]
     for body in bodies:
         publisher.send(body)
     out.update({"cheapest_twd": o.price, "matched": len(bodies), "skipped": ev.skipped})

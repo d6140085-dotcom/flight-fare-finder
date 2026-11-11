@@ -91,6 +91,7 @@ class Settings:
     max_work_items: int = 500     # MAX_WORK_ITEMS: live work items per run (rotating window)
     dry_run_max_items: int = 50   # DRY_RUN_MAX_ITEMS: in-process dry-run lookups per run (rotating)
     schedule_minutes: int = 30    # SCHEDULE_PERIOD_MINUTES: must match the EventBridge rate
+    message_version: int = 1      # NOTIFY_MESSAGE_VERSION: 1 = M1 shape; 2 adds "month" and "as_of" (Phase 2B-1)
     queue_url: str = ""           # FARE_QUEUE_URL (live parser only)
     parser_function: str = "flight-parser"
     tp_param: str = "/flight/travelpayouts"
@@ -115,6 +116,7 @@ class Settings:
                    max_work_items=bounded_int(env, "MAX_WORK_ITEMS", 500, 1, 10000),
                    dry_run_max_items=bounded_int(env, "DRY_RUN_MAX_ITEMS", 50, 1, 1000),
                    schedule_minutes=bounded_int(env, "SCHEDULE_PERIOD_MINUTES", 30, 1, 1440),
+                   message_version=bounded_int(env, "NOTIFY_MESSAGE_VERSION", 1, 1, 2),
                    queue_url=env.get("FARE_QUEUE_URL", ""),
                    parser_function=env.get("PARSER_FUNCTION") or "flight-parser",
                    tp_param=env.get("TP_PARAM") or "/flight/travelpayouts")
