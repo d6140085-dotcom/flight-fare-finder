@@ -13,6 +13,7 @@ import { demoSubscriptions, type RouteSubscription } from "./subscriptions";
 const NOW = new Date("2026-11-05T03:00:00Z");
 const at = "2026-11-05T02:30:00Z";
 const base: RouteSubscription = {
+  id: "TPE-LON_2027-02",
   route: "TPE-LON",
   origin: "TPE",
   destination: "LON",

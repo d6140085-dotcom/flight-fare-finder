@@ -12,13 +12,14 @@ import {
   type RouteSubscription,
   type State,
 } from "./subscriptions";
+import { subscriptionId } from "./subscription-id";
 
 // 2026-11-05 11:00 in Taipei: current month 2026-11, selectable 2026-12 … 2027-11.
 const NOW = new Date("2026-11-05T03:00:00Z");
 const STAMP = NOW.toISOString();
 const sub = (route: string, extra: Partial<RouteSubscription> = {}): RouteSubscription => {
   const [origin = "", destination = ""] = route.split("-");
-  return {
+  const row: Omit<RouteSubscription, "id"> = {
     route,
     origin,
     destination,
@@ -31,6 +32,7 @@ const sub = (route: string, extra: Partial<RouteSubscription> = {}): RouteSubscr
     updated_at: STAMP,
     ...extra,
   };
+  return { id: subscriptionId(origin, destination, row.departure_month), ...row };
 };
 const state = (subs: RouteSubscription[]): State => ({ subs, lastError: null });
 const ten = (extra: Partial<RouteSubscription> = {}) =>
@@ -163,9 +165,10 @@ describe("validate", () => {
     });
   });
 
-  it("prevents duplicate route pairs, even with a different month, on create and on edit", () => {
+  it("allows other months of a route but no duplicate route and month (R-MM-1)", () => {
     const subs = [sub("TPE-TYO"), sub("KHH-OKA")];
-    expect(validate(subs, { ...ok, month: "2027-03" }, { now: NOW })).toMatchObject({
+    expect(validate(subs, { ...ok, month: "2027-03" }, { now: NOW })).toMatchObject({ ok: true });
+    expect(validate(subs, ok, { now: NOW })).toMatchObject({
       errors: ["duplicate_subscription"],
     });
     expect(
@@ -173,6 +176,19 @@ describe("validate", () => {
     ).toMatchObject({ errors: ["duplicate_subscription"] });
     expect(
       validate(subs, { ...ok, targetText: "8000" }, { editing: subs[0]!, now: NOW }),
+    ).toMatchObject({ ok: true });
+    // Moving a month onto a sibling month of the same route is a duplicate.
+    const siblings = [sub("TPE-TYO"), sub("TPE-TYO", { departure_month: "2027-01" })];
+    expect(
+      validate(siblings, { ...ok, month: "2027-01" }, { editing: siblings[0]!, now: NOW }),
+    ).toMatchObject({ errors: ["duplicate_subscription"] });
+  });
+
+  it("lets a legacy rolling row coexist with fixed months of the same route", () => {
+    const legacy = sub("TPE-TYO", { departure_month: null, plan_name: "tokyo" });
+    expect(validate([legacy], ok, { now: NOW })).toMatchObject({ ok: true }); // 2026-12 = its month
+    expect(
+      validate([legacy], { ...ok, month: ROLLING }, { editing: legacy, now: NOW }),
     ).toMatchObject({ ok: true });
   });
 
@@ -200,14 +216,33 @@ describe("reducer", () => {
 
   it("creates an active TWD row with the chosen month and no plan name", () => {
     const s = reducer(state([]), { type: "create", value, now: STAMP });
-    expect(s.subs).toEqual([{ ...sub("TPE-OKA"), departure_month: "2027-01", target_price: 5000 }]);
+    expect(s.subs).toEqual([sub("TPE-OKA", { departure_month: "2027-01", target_price: 5000 })]);
+    expect(s.subs[0]?.id).toBe("TPE-OKA_2027-01");
     expect(s.lastError).toBeNull();
   });
 
   it("refuses duplicates and an 11th record even if the UI is bypassed", () => {
     expect(
-      reducer(state([sub("TPE-OKA")]), { type: "create", value, now: STAMP }).lastError?.code,
+      reducer(state([sub("TPE-OKA", { departure_month: "2027-01" })]), {
+        type: "create",
+        value,
+        now: STAMP,
+      }).lastError?.code,
     ).toBe("duplicate_subscription");
+    // Three months of one route are three records.
+    let multi = state([]);
+    for (const m of ["2027-01", "2027-02", "2027-03"]) {
+      multi = reducer(multi, {
+        type: "create",
+        value: { ...value, departure_month: m },
+        now: STAMP,
+      });
+    }
+    expect(multi.subs.map((x) => x.id)).toEqual([
+      "TPE-OKA_2027-01",
+      "TPE-OKA_2027-02",
+      "TPE-OKA_2027-03",
+    ]);
     const full = reducer(state(ten({ alerts_paused: true })), {
       type: "create",
       value: { ...value, destination: "DPS" },
@@ -218,24 +253,24 @@ describe("reducer", () => {
   });
 
   it("pause and resume neither free nor consume quota", () => {
-    let s = reducer(state(ten()), { type: "pause", route: "TPE-TYO", now: STAMP });
+    let s = reducer(state(ten()), { type: "pause", id: "TPE-TYO_2026-12", now: STAMP });
     expect(s.subs).toHaveLength(10);
     expect(
       reducer(s, { type: "create", value: { ...value, destination: "DPS" }, now: STAMP }).lastError
         ?.code,
     ).toBe("limit_reached");
-    s = reducer(s, { type: "resume", route: "TPE-TYO", now: STAMP });
+    s = reducer(s, { type: "resume", id: "TPE-TYO_2026-12", now: STAMP });
     expect(s.lastError).toBeNull();
     expect(statusOf(s.subs[0]!, NOW)).toBe("active");
   });
 
   it("deleting frees exactly one slot", () => {
-    const s = reducer(state(ten()), { type: "delete", route: "TPE-TYO" });
+    const s = reducer(state(ten()), { type: "delete", id: "TPE-TYO_2026-12" });
     expect(s.subs).toHaveLength(9);
     expect(
       reducer(s, { type: "create", value: { ...value, destination: "DPS" }, now: STAMP }).subs,
     ).toHaveLength(10);
-    expect(reducer(state([]), { type: "delete", route: "TPE-TYO" }).lastError?.code).toBe(
+    expect(reducer(state([]), { type: "delete", id: "TPE-TYO_2026-12" }).lastError?.code).toBe(
       "not_found",
     );
   });
@@ -249,7 +284,7 @@ describe("reducer", () => {
     });
     const s = reducer(state([m1, sub("KHH-OKA")]), {
       type: "edit",
-      route: "TPE-TYO",
+      id: "TPE-TYO",
       value: { origin: "RMQ", destination: "SEL", departure_month: "2027-02", target: 7000 },
       now: STAMP,
     });
@@ -271,7 +306,7 @@ describe("reducer", () => {
     });
     const s = reducer(state([m1]), {
       type: "edit",
-      route: "TPE-TYO",
+      id: "TPE-TYO",
       value: { origin: "TPE", destination: "TYO", departure_month: null, target: 8500 },
       now: STAMP,
     });
@@ -288,18 +323,19 @@ describe("reducer", () => {
     expect(statusOf(expired, NOW)).toBe("expired");
     const s = reducer(state([expired]), {
       type: "edit",
-      route: "TPE-TYO",
+      id: "TPE-TYO_2026-09",
       value: { origin: "TPE", destination: "TYO", departure_month: "2027-03", target: 9000 },
       now: STAMP,
     });
     expect(statusOf(s.subs[0]!, NOW)).toBe("active");
     expect(s.subs).toHaveLength(1);
+    expect(s.subs[0]?.id).toBe("TPE-TYO_2027-03"); // the month change moved its ID
   });
 
   it("refuses a route change onto an existing route", () => {
     const s = reducer(state([sub("TPE-TYO"), sub("KHH-OKA")]), {
       type: "edit",
-      route: "TPE-TYO",
+      id: "TPE-TYO_2026-12",
       value: { origin: "KHH", destination: "OKA", departure_month: "2026-12", target: 1 },
       now: STAMP,
     });
@@ -314,9 +350,13 @@ describe("messages and demo data", () => {
     expect(errorMessage("limit_reached")).toContain(
       "最多 10 筆航線訂閱（已暫停與已過期的訂閱也算在內）",
     );
-    expect(errorMessage("duplicate_subscription", { origin: "TPE", destination: "TYO" })).toContain(
-      "台北 → 東京",
-    );
+    expect(
+      errorMessage("duplicate_subscription", {
+        origin: "TPE",
+        destination: "TYO",
+        departure_month: "2027-01",
+      }),
+    ).toBe("你已經訂閱過「台北 → 東京」 2027 年 1 月出發的航線，同一航線同一月份只能訂閱一次。");
     expect(errorMessage("invalid_target_price")).toContain("1,000,000");
     expect(errorMessage("invalid_departure_month", { now: NOW })).toBe(
       "請選擇 2026 年 12 月 到 2027 年 11 月 之間的出發月份。",

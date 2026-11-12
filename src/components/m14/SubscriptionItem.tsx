@@ -106,13 +106,18 @@ export function SubscriptionItem({
 }: SubscriptionItemProps) {
   const [editing, setEditing] = useState(false);
   const label = routeLabel(sub.origin, sub.destination);
+  // Several subscriptions can share a route (one per month): the accessible name includes it.
+  const monthName =
+    sub.departure_month === null
+      ? `每月滾動（${monthLabel(effectiveMonth(null, now))}）`
+      : monthLabel(sub.departure_month);
   const status = statusOf(sub, now);
   const shown = fare.kind === "ok" && price !== null;
   const problem = fare.kind === "error" || fare.kind === "expired";
 
   return (
     <li
-      aria-label={label}
+      aria-label={`${label}・${monthName}`}
       className="rounded-2xl border border-border bg-card p-4 transition-colors hover:border-primary/50 sm:p-6"
     >
       <div className="flex items-start justify-between gap-3">

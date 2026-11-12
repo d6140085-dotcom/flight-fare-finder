@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from . import history, keys, mailer, months, rules, searchlinks
+from . import history, keys, mailer, months, rules, searchlinks, subkeys
 from .history import ClaimConflict
 
 
@@ -46,7 +46,9 @@ def search_links(m, now, deps):
     o, d = m["route"].split("-")
     f = m["cheapest"]
     try:
-        return searchlinks.build(o, d, f.get("depart_date"), f.get("return_date"), months.today(now),
+        # Links are a function of the message: the scheduler's as_of fixes "today", so a retry on
+        # another day renders the same links (same payload under the same Idempotency-Key).
+        return searchlinks.build(o, d, f.get("depart_date"), f.get("return_date"), months.today(as_of_of(m, now)),
                                  catalog=deps.catalog, config=deps.links_config, marker=deps.marker)
     except Exception as e:              # noqa: BLE001 - never send the reference fare without the link
         raise mailer.AffiliateLinkUnavailable(f"link_builder_error:{type(e).__name__}") from None
@@ -64,6 +66,28 @@ def render(m, now, deps, t):
 
 def tag(email, route):
     return f"{route} sub:{hashlib.sha256(email.encode()).hexdigest()[:8]}"
+
+
+MAX_KEYS = 10  # a user holds at most 10 subscriptions
+
+
+def subscription_keys(m, route):
+    """Sort keys of the matched subscriptions (R-MM-1 messages), or None for older messages.
+
+    Every key must be a well-formed key of the message's route pair; a fixed-month key must be for
+    the message's month. Anything else can never be processed (dropped, not retried)."""
+    raw = m.get("subscription_keys")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_KEYS or len(set(map(str, raw))) != len(raw):
+        raise keys.InvalidMessage("invalid subscription_keys")
+    for k in raw:
+        parts = subkeys.parse_key(k)
+        if not parts or subkeys.pair(parts[0], parts[1]) != route:
+            raise keys.InvalidMessage("subscription key of another route")
+        if parts[2] is not None and m.get("month") is not None and parts[2] != m.get("month"):
+            raise keys.InvalidMessage("subscription key of another month")
+    return sorted(raw)
 
 
 def validate(m):
@@ -95,12 +119,8 @@ def as_of_of(m, now):
         raise keys.InvalidMessage("invalid as_of") from None
 
 
-def recheck(deps, m, email, route, month, price, as_of):
-    """Re-read the subscription just before sending (it may have been paused, edited, expired or
-    deleted since the fare check). Returns None if still eligible, else the skip reason."""
-    if deps.subscriptions is None:
-        return None
-    row = deps.subscriptions.get_item(Key={"email": email, "route": route}, ConsistentRead=True).get("Item")
+def eligibility(row, month, price, as_of):
+    """None if this subscription row still wants this alert, else why not."""
     if row is None:
         return "subscription_gone"
     dep = row.get("departure_month")
@@ -117,6 +137,47 @@ def recheck(deps, m, email, route, month, price, as_of):
     if not target.is_finite() or target < price:
         return "target_changed"
     return None
+
+
+def recheck(deps, m, email, route, month, price, as_of):
+    """Re-read the subscriptions just before sending (they may have been paused, edited, expired
+    or deleted since the fare check).
+
+    Returns (None, eligible rows) if at least one subscription still wants the alert, else
+    (reason, []). With `subscription_keys` (R-MM-1) every listed key is read in the caller's own
+    partition (the message's email); an alert is sent if ANY of them is still eligible, so a
+    paused or deleted overlapping subscription never suppresses a valid alert of another one.
+    Older messages (no keys) re-read the legacy key "ORIG-DEST" as before."""
+    if deps.subscriptions is None:
+        return None, []
+    sub_keys = subscription_keys(m, route) or [route]
+    rows, reasons = [], []
+    for k in sub_keys:
+        row = deps.subscriptions.get_item(Key={"email": email, "route": k}, ConsistentRead=True).get("Item")
+        reason = eligibility(row, month, price, as_of)
+        if reason is None:
+            rows.append(row)
+        else:
+            reasons.append(reason)
+    if rows:
+        return None, rows
+    return "+".join(sorted(set(reasons))), []
+
+
+def presented_target(m, eligible):
+    """Target shown in the email: the lowest target among the still-eligible subscriptions (the
+    fare is at or below all of them). Messages without `subscription_keys` (older fare checks)
+    always show the message's own value, exactly as before R-MM-1. The caller pins the result to
+    the claim, so retries of one fare event never change the payload."""
+    if m.get("subscription_keys") is None:
+        return m.get("target_price")
+    targets = []
+    for row in eligible:
+        try:
+            targets.append(int(Decimal(str(row.get("target_price")))))
+        except (InvalidOperation, ValueError, TypeError):
+            pass
+    return min(targets) if targets else m.get("target_price")
 
 
 def previous_send(deps, state, email, route, month, now, price):
@@ -146,6 +207,7 @@ def message_age_basis(m, enqueued_at):
 def process(m, delivery_id, now, deps, enqueued_at=None):
     email, route, price = validate(m)
     month, month_source = keys.resolve_month(m)
+    subscription_keys(m, route)  # malformed keys: dropped here, before any history write
     as_of = as_of_of(m, now)
     sid = keys.subscriber_id(email, deps.pepper)
     pk = keys.stream_pk(sid, route, month)
@@ -186,7 +248,8 @@ def process(m, delivery_id, now, deps, enqueued_at=None):
     except ClaimConflict:
         raise Retry(f"{t}: stream changed or claimed concurrently") from None
     try:
-        reason = recheck(deps, m, email, route, month, price, as_of) if deps.settings.recheck_subscription else None
+        reason, eligible = (recheck(deps, m, email, route, month, price, as_of)
+                            if deps.settings.recheck_subscription else (None, []))
         if reason and not ours:
             deps.history.release(pk, eid)
             deps.log(f"{t}: skipped ({reason})")
@@ -197,6 +260,18 @@ def process(m, delivery_id, now, deps, enqueued_at=None):
                                 email=email, dual_write=deps.settings.legacy_dual_write)
             deps.log(f"{t}: recorded unconfirmed earlier attempt ({reason})")
             return "recorded:unconfirmed"
+        target = presented_target(m, eligible)
+        if m.get("subscription_keys") is not None and deps.settings.recheck_subscription:
+            # first attempt pins its choice; a redelivery (e.g. after an unknown Resend outcome)
+            # reuses it even if the subscriptions changed meanwhile
+            try:
+                target = deps.history.pin_target(pk, eid, target)
+            except ClaimConflict:
+                raise Retry(f"{t}: claim lost before sending") from None
+        if target != m.get("target_price"):
+            # e.g. the strictest overlapping subscription was paused since the fare check: show
+            # the target of one that still wants the alert (pure re-render, same links)
+            subject, page, text = render({**m, "target_price": target}, now, deps, t)
         kw = {"opener": deps.opener} if deps.opener else {}
         status, outcome, err = mailer.send(deps.resend_cfg(), email, subject, page, text, keys.idempotency_key(eid), **kw)
     except BaseException:

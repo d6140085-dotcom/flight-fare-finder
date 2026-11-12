@@ -18,9 +18,16 @@ import {
   monthLabel,
   selectableMonths,
 } from "./months";
+import { subscriptionId } from "./subscription-id";
 
 export interface RouteSubscription {
-  route: string; // "ORIG-DEST", the DynamoDB sort key; one subscription per route pair
+  /**
+   * Public subscription ID (R-MM-1): "KHH-TYO" for the legacy rolling row, "KHH-TYO_2027-01"
+   * for a fixed month. One subscription per (route pair, fixed month), plus at most one rolling
+   * row per pair. Used in API paths; see subscription-id.ts.
+   */
+  id: string;
+  route: string; // "ORIG-DEST", the route pair (several subscriptions can share it)
   origin: string;
   destination: string;
   /** Fixed departure month "YYYY-MM", or null for a legacy M1 rolling next-month subscription. */
@@ -69,7 +76,14 @@ const DEST_CODES = new Set(DESTINATIONS.map((a) => a.code));
 
 export function errorMessage(
   code: ErrorCode,
-  ctx: { origin?: string; destination?: string; now?: Date; policy?: SubscriptionPolicy } = {},
+  ctx: {
+    origin?: string;
+    destination?: string;
+    /** For duplicate_subscription: the fixed month, or null for the rolling row. */
+    departure_month?: string | null;
+    now?: Date;
+    policy?: SubscriptionPolicy;
+  } = {},
 ): string {
   const policy = ctx.policy ?? POLICY;
   const fmt = new Intl.NumberFormat("zh-TW");
@@ -90,8 +104,10 @@ export function errorMessage(
       const months = selectableMonths(ctx.now ?? new Date(), policy);
       return `請選擇 ${monthLabel(months[0] ?? "")} 到 ${monthLabel(months.at(-1) ?? "")} 之間的出發月份。`;
     }
-    case "duplicate_subscription":
-      return `你已經訂閱過「${routeLabel(ctx.origin ?? "", ctx.destination ?? "")}」這條航線（每條航線只能訂閱一個月份）。`;
+    case "duplicate_subscription": {
+      const when = ctx.departure_month ? ` ${monthLabel(ctx.departure_month)}` : "（每月滾動）";
+      return `你已經訂閱過「${routeLabel(ctx.origin ?? "", ctx.destination ?? "")}」${when}出發的航線，同一航線同一月份只能訂閱一次。`;
+    }
     case "limit_reached":
       return `每位使用者最多 ${policy.maxSubscriptions} 筆航線訂閱（已暫停與已過期的訂閱也算在內），請先刪除不需要的訂閱。`;
     case "not_found":
@@ -145,9 +161,10 @@ export function validate(
     errors.push("invalid_target_price");
   }
 
-  const route = routeKey(origin, destination);
-  if (origin && destination && route !== editing?.route && subs.some((s) => s.route === route)) {
-    errors.push("duplicate_subscription");
+  // One subscription per (route, fixed month) and one rolling row per route (R-MM-1).
+  if (origin && destination && (departure_month !== null || month === ROLLING)) {
+    const id = subscriptionId(origin, destination, departure_month);
+    if (id !== editing?.id && subs.some((s) => s.id === id)) errors.push("duplicate_subscription");
   }
   if (editing === undefined && subs.length >= policy.maxSubscriptions) errors.push("limit_reached");
 
@@ -156,37 +173,39 @@ export function validate(
     : { ok: true, value: { origin, destination, departure_month, target } };
 }
 
+/** Actions address a subscription by its public ID (`id`), never by the route pair. */
 export type Action =
   | { type: "create"; value: Validated; now: string }
-  | { type: "edit"; route: string; value: Validated; now: string }
-  | { type: "pause"; route: string; now: string }
-  | { type: "resume"; route: string; now: string }
-  | { type: "delete"; route: string }
+  | { type: "edit"; id: string; value: Validated; now: string }
+  | { type: "pause"; id: string; now: string }
+  | { type: "resume"; id: string; now: string }
+  | { type: "delete"; id: string }
   | { type: "reset"; subs: RouteSubscription[] };
 
 export interface State {
   subs: RouteSubscription[];
-  lastError: { code: ErrorCode; route?: string } | null;
+  lastError: { code: ErrorCode; id?: string } | null;
 }
 
 /** Applies one action with the same guarantees the API will give (see the API spec). */
 export function reducer(state: State, action: Action, policy: SubscriptionPolicy = POLICY): State {
   const { subs } = state;
-  const fail = (code: ErrorCode, route?: string): State => ({
+  const fail = (code: ErrorCode, id?: string): State => ({
     subs,
-    lastError: route ? { code, route } : { code },
+    lastError: id ? { code, id } : { code },
   });
-  const find = (route: string) => subs.find((s) => s.route === route);
+  const find = (id: string) => subs.find((s) => s.id === id);
 
   switch (action.type) {
     case "create": {
       const { origin, destination, departure_month, target } = action.value;
-      const route = routeKey(origin, destination);
-      if (find(route)) return fail("duplicate_subscription", route);
-      // Strict total limit: every record counts, whatever its status.
+      const id = subscriptionId(origin, destination, departure_month);
+      if (find(id)) return fail("duplicate_subscription", id);
+      // Strict total limit: every record counts, whatever its status (each month counts).
       if (subs.length >= policy.maxSubscriptions) return fail("limit_reached");
       const row: RouteSubscription = {
-        route,
+        id,
+        route: routeKey(origin, destination),
         origin,
         destination,
         departure_month,
@@ -200,46 +219,49 @@ export function reducer(state: State, action: Action, policy: SubscriptionPolicy
       return { subs: [...subs, row], lastError: null };
     }
     case "edit": {
-      const old = find(action.route);
-      if (!old) return fail("not_found", action.route);
+      const old = find(action.id);
+      if (!old) return fail("not_found", action.id);
       const { origin, destination, departure_month, target } = action.value;
+      const id = subscriptionId(origin, destination, departure_month);
+      if (id !== old.id && find(id)) return fail("duplicate_subscription", id);
+      // A route or month change moves the record to another ID (delete old + create new in one
+      // step; the API uses a DynamoDB transaction). The record count doesn't change. Pause state
+      // is kept; plan_name only belongs to the rolling M1 rows; a month-only change keeps
+      // created_at. Choosing a future month reactivates an expired subscription.
       const route = routeKey(origin, destination);
-      if (route !== old.route && find(route)) return fail("duplicate_subscription", route);
-      // Route change = delete old + create new in one step (the API uses a DynamoDB transaction).
-      // The record count doesn't change. Pause state is kept; plan_name only belongs to the
-      // original M1 routes. Choosing a future month reactivates an expired subscription.
-      const changed = route !== old.route;
+      const routeChanged = route !== old.route;
       const row: RouteSubscription = {
         ...old,
+        id,
         route,
         origin,
         destination,
         departure_month,
         target_price: target,
         updated_at: action.now,
-        plan_name: changed ? null : old.plan_name,
-        created_at: changed ? action.now : old.created_at,
+        plan_name: id === old.id ? old.plan_name : null,
+        created_at: routeChanged ? action.now : old.created_at,
       };
-      return { subs: subs.map((s) => (s.route === old.route ? row : s)), lastError: null };
+      return { subs: subs.map((s) => (s.id === old.id ? row : s)), lastError: null };
     }
     case "pause":
     case "resume": {
       // Neither frees nor consumes quota.
-      const row = find(action.route);
-      if (!row) return fail("not_found", action.route);
+      const row = find(action.id);
+      if (!row) return fail("not_found", action.id);
       const paused = action.type === "pause";
       if (row.alerts_paused === paused) return { subs, lastError: null };
       return {
         subs: subs.map((s) =>
-          s.route === row.route ? { ...s, alerts_paused: paused, updated_at: action.now } : s,
+          s.id === row.id ? { ...s, alerts_paused: paused, updated_at: action.now } : s,
         ),
         lastError: null,
       };
     }
     case "delete":
       // The only action that frees a slot.
-      if (!find(action.route)) return fail("not_found", action.route);
-      return { subs: subs.filter((s) => s.route !== action.route), lastError: null };
+      if (!find(action.id)) return fail("not_found", action.id);
+      return { subs: subs.filter((s) => s.id !== action.id), lastError: null };
     case "reset":
       return { subs: action.subs, lastError: null };
   }
@@ -251,6 +273,7 @@ export function demoSubscriptions(now: Date, policy = POLICY): RouteSubscription
   const thisMonth = currentMonth(now, policy.timeZone);
   return [
     {
+      id: "TPE-TYO",
       route: "TPE-TYO",
       origin: "TPE",
       destination: "TYO",
@@ -263,6 +286,7 @@ export function demoSubscriptions(now: Date, policy = POLICY): RouteSubscription
       updated_at: "2026-11-01T00:00:00Z",
     },
     {
+      id: `KHH-OKA_${addMonths(thisMonth, 2)}`,
       route: "KHH-OKA",
       origin: "KHH",
       destination: "OKA",
@@ -275,6 +299,7 @@ export function demoSubscriptions(now: Date, policy = POLICY): RouteSubscription
       updated_at: "2026-11-03T00:00:00Z",
     },
     {
+      id: `RMQ-SEL_${addMonths(thisMonth, -1)}`,
       route: "RMQ-SEL",
       origin: "RMQ",
       destination: "SEL",
@@ -287,6 +312,7 @@ export function demoSubscriptions(now: Date, policy = POLICY): RouteSubscription
       updated_at: "2026-09-20T00:00:00Z",
     },
     {
+      id: `TPE-LON_${addMonths(thisMonth, 3)}`,
       route: "TPE-LON",
       origin: "TPE",
       destination: "LON",
@@ -299,6 +325,7 @@ export function demoSubscriptions(now: Date, policy = POLICY): RouteSubscription
       updated_at: "2026-11-04T00:00:00Z",
     },
     {
+      id: `TPE-SYD_${addMonths(thisMonth, 1)}`,
       route: "TPE-SYD",
       origin: "TPE",
       destination: "SYD",

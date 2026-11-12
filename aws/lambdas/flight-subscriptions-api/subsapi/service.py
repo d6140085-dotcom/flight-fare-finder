@@ -4,6 +4,7 @@ import random
 import time
 from datetime import datetime, timedelta, timezone
 
+from . import subkeys
 from . import validation as v
 from .errors import ApiError
 from .months import current_month, effective_month, is_expired, selectable_months
@@ -49,14 +50,17 @@ class Service:
         return {"zh": p["name_zh"], "en": p["name_en"]} if p else None
 
     def view(self, row, now):
-        """Normalise a stored row (M1 or M1.4) to the API shape (§3.1, §8.1)."""
-        route = row["route"]
-        o, _, d = route.partition("-")
-        o, d = row.get("origin") or o, row.get("destination") or d
+        """Normalise a stored row (M1 or M1.4) to the API shape (§3.1, §8.1). `id` is the public,
+        URL-safe subscription ID (subkeys.public_id of the sort key); `route` is the route pair."""
+        key = row["route"]
+        parts = subkeys.parse_key(key) or (None, None, None)
+        o, d = row.get("origin") or parts[0], row.get("destination") or parts[1]
         month = row.get("departure_month")
+        route = subkeys.pair(o, d)
         paused = bool(row.get("alerts_paused", False))
         status = "expired" if is_expired(month, now) else ("paused" if paused else "active")
         return {
+            "id": subkeys.public_id(key),
             "route": route,
             "origin": o,
             "destination": d,
@@ -78,7 +82,9 @@ class Service:
     # ---- GET /subscriptions ------------------------------------------------------------
     def list(self, email):
         now = self.clock()
-        rows = sorted(self.store.list_rows(email), key=lambda r: (r.get("created_at") or "", r["route"]))
+        rows = sorted(self.store.list_rows(email),
+                      key=lambda r: (r.get("route", "").split("#")[0], r.get("departure_month") or "",
+                                     r.get("created_at") or "", r["route"]))
         return 200, {
             "subscriptions": [self.view(r, now) for r in rows],
             "limits": {"max": self.cfg.max_subscriptions, "used": len(rows)},
@@ -92,32 +98,33 @@ class Service:
     def create(self, email, body):
         now = self.clock()
         o, d, month, target = v.create_body(self.cfg, body, now)
-        route = f"{o}-{d}"
+        key = subkeys.sort_key(o, d, month)  # one row per (route, fixed month) — R-MM-1
+        dup = {"route": subkeys.pair(o, d), "departure_month": month}
         for attempt in range(MAX_ATTEMPTS):
             self._backoff(attempt)
             quota = self.store.get_quota(email)  # 1. version FIRST
             rows = self.store.list_rows(email)  # 2. then the strongly consistent count
-            if any(r["route"] == route for r in rows):
-                raise ApiError(409, "duplicate_subscription", {"route": route})
+            if any(r["route"] == key for r in rows):
+                raise ApiError(409, "duplicate_subscription", dup)
             if len(rows) >= self.cfg.max_subscriptions:
                 raise ApiError(409, "limit_reached", {"max": self.cfg.max_subscriptions, "used": len(rows)})
             stamp = self._stamp()
-            row = {"route": route, "origin": o, "destination": d, "departure_month": month,
+            row = {"route": key, "origin": o, "destination": d, "departure_month": month,
                    "target_price": target, "currency": "TWD", "created_at": stamp, "updated_at": stamp}
             try:
                 self.store.create(email, row, quota, len(rows) + 1, stamp)
                 return 201, self.view(row, now)
             except TxCancelled as e:
                 if e.failed(0):
-                    raise ApiError(409, "duplicate_subscription", {"route": route}) from None
+                    raise ApiError(409, "duplicate_subscription", dup) from None
                 # quota version moved or TransactionConflict: re-read and retry
             except WriteConflict:
                 raise ApiError(409, "conflict") from None  # outcome unknown: never retry blindly
         raise ApiError(409, "conflict")
 
-    # ---- DELETE /subscriptions/{route} -------------------------------------------------
-    def delete(self, email, route, if_updated_at=None):
-        v.route_param(route)
+    # ---- DELETE /subscriptions/{id} ----------------------------------------------------
+    def delete(self, email, sub_id, if_updated_at=None):
+        route = v.id_param(sub_id)  # the sort key; always within the caller's own partition
         for attempt in range(MAX_ATTEMPTS):
             self._backoff(attempt)
             quota = self.store.get_quota(email)
@@ -140,10 +147,10 @@ class Service:
                 raise ApiError(409, "conflict") from None  # outcome unknown: never retry blindly
         raise ApiError(409, "conflict")
 
-    # ---- PATCH /subscriptions/{route} (never touches the quota, §5.4) -----------------
-    def patch(self, email, route, body):
+    # ---- PATCH /subscriptions/{id} (never touches the quota, §5.4) --------------------
+    def patch(self, email, sub_id, body):
         now = self.clock()
-        v.route_param(route)
+        route = v.id_param(sub_id)  # the sort key
         v.patch_body(body)
         row = self.store.get_row(email, route)
         if row is None:
@@ -151,7 +158,7 @@ class Service:
         stored_at = row.get("updated_at")
         if "if_updated_at" in body and body["if_updated_at"] != stored_at:
             raise ApiError(409, "conflict")
-        cur_o, _, cur_d = route.partition("-")
+        cur_o, cur_d, _ = subkeys.parse_key(route)
         o, d = row.get("origin") or cur_o, row.get("destination") or cur_d
         if "origin" in body:
             o = v.origin(self.cfg, body["origin"])
@@ -161,10 +168,13 @@ class Service:
         month = v.patched_month(self.cfg, body["departure_month"], stored_month, now) if "departure_month" in body else stored_month
         target = v.target_price(self.cfg, body["target_price"]) if "target_price" in body else int(row["target_price"])
         paused = body["alerts_paused"] if "alerts_paused" in body else bool(row.get("alerts_paused", False))
-        new_route = f"{o}-{d}"
+        new_key = subkeys.sort_key(o, d, month)
 
-        if new_route != route:
-            return self._change_route(email, row, new_route, o, d, month, target, paused, now)
+        if new_key != route:
+            # Route and/or month changed: the sort key changes, so Delete old + Put new in one
+            # transaction (record count unchanged). Includes rolling -> fixed and reactivating
+            # an expired month.
+            return self._change_key(email, row, new_key, o, d, month, target, paused, now)
 
         if (month, target, paused) == (stored_month, int(row["target_price"]), bool(row.get("alerts_paused", False))):
             return 200, self.view(row, now)  # nothing to change, no write
@@ -191,18 +201,24 @@ class Service:
             raise ApiError(409, "conflict") from None
         return 200, self.view(new, now)
 
-    def _change_route(self, email, row, new_route, o, d, month, target, paused, now):
-        if self.store.get_row(email, new_route) is not None:
-            raise ApiError(409, "duplicate_subscription", {"route": new_route})
+    def _change_key(self, email, row, new_key, o, d, month, target, paused, now):
+        dup = {"route": subkeys.pair(o, d), "departure_month": month}
+        if self.store.get_row(email, new_key) is not None:
+            raise ApiError(409, "duplicate_subscription", dup)
         stamp = self._stamp(after=row.get("updated_at"))
-        new_row = {"route": new_route, "origin": o, "destination": d, "departure_month": month,
+        same_route = subkeys.pair_of_key(row["route"]) == subkeys.pair(o, d)
+        new_row = {"route": new_key, "origin": o, "destination": d, "departure_month": month,
                    "target_price": target, "currency": "TWD", "alerts_paused": True if paused else None,
-                   "previous_route": row["route"], "created_at": stamp, "updated_at": stamp}
+                   # plan_name marks the two M1 plan rows, whose key is the rolling pair: never carried
+                   # to another key. A month-only change keeps created_at (same subscription).
+                   "previous_route": row["route"],
+                   "created_at": row.get("created_at") if same_route and row.get("created_at") else stamp,
+                   "updated_at": stamp}
         try:
             self.store.change_route(email, row["route"], row.get("updated_at"), new_row)
         except TxCancelled as e:
             if e.failed(1):
-                raise ApiError(409, "duplicate_subscription", {"route": new_route}) from None
+                raise ApiError(409, "duplicate_subscription", dup) from None
             if e.failed(0):
                 if self.store.get_row(email, row["route"]) is None:
                     raise ApiError(404, "not_found") from None
@@ -220,7 +236,7 @@ class Service:
             raise ApiError(400, "invalid_plan")
         target = v.legacy_target_price(self.cfg, body.get("target_price"))
         o, d = LEGACY_PLANS[plan]
-        route = f"{o}-{d}"
+        route = subkeys.sort_key(o, d, None)  # the legacy rolling row; fixed-month rows are separate
         for attempt in range(MAX_ATTEMPTS):
             self._backoff(attempt)
             quota = self.store.get_quota(email)

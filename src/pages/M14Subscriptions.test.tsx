@@ -53,8 +53,13 @@ function renderPage(
 }
 
 const list = () => screen.getByRole("list", { name: "訂閱列表" });
-const item = (name: string) => within(list()).getByRole("listitem", { name });
+/** A card by its route label; the accessible name continues with the month (R-MM-1). */
+const startsWith = (name: string) =>
+  new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}・`);
+const item = (name: string) => within(list()).getByRole("listitem", { name: startsWith(name) });
 const createForm = () => screen.getByRole("form", { name: "新增訂閱" });
+const monthText = (m: string) => `${Number(m.slice(0, 4))} 年 ${Number(m.slice(5, 7))} 月`;
+
 /** The value shown for one labelled fact on a card (出發月份, 目標價, 參考票價…, 與目標價相比). */
 function fact(row: HTMLElement, term: string): string {
   const dt = within(row)
@@ -182,11 +187,53 @@ describe("origin, destination and month selection", () => {
   it("shows field errors and server-side duplicate errors", async () => {
     renderPage();
     await loaded();
-    fill(createForm(), "TPE", "TYO", "0");
+    fill(createForm(), "TPE", "SYD", "0", "2026-12");
     fireEvent.click(within(createForm()).getByRole("button", { name: "開始追蹤" }));
     const alert = await within(createForm()).findByRole("alert");
-    expect(alert).toHaveTextContent("你已經訂閱過「台北 → 東京」");
+    expect(alert).toHaveTextContent("你已經訂閱過「台北 → 雪梨」 2026 年 12 月出發的航線");
     expect(alert).toHaveTextContent("目標價請輸入");
+  });
+
+  it("creates KHH → TYO for three months as three independent subscriptions (R-MM-1)", async () => {
+    renderPage({ scenario: "empty" });
+    await loaded();
+    for (const [month, target] of [
+      ["2027-01", "9000"],
+      ["2027-02", "9500"],
+      ["2027-03", "10000"],
+    ] as const) {
+      fill(createForm(), "KHH", "TYO", target, month);
+      fireEvent.click(within(createForm()).getByRole("button", { name: "開始追蹤" }));
+      await waitFor(() =>
+        expect(
+          within(list()).getByRole("listitem", { name: `高雄 → 東京・${monthText(month)}` }),
+        ).toBeInTheDocument(),
+      );
+    }
+    expect(screen.getByText("我的航線訂閱：3 / 10")).toBeInTheDocument();
+    const cards = within(list()).getAllByRole("listitem", { name: startsWith("高雄 → 東京") });
+    expect(cards.map((c) => fact(c, "出發月份"))).toEqual([
+      "2027 年 1 月",
+      "2027 年 2 月",
+      "2027 年 3 月",
+    ]);
+    expect(cards.map((c) => fact(c, "目標價"))).toEqual(["NT$9,000", "NT$9,500", "NT$10,000"]);
+    // Each one is paused, edited and deleted on its own.
+    const feb = () => within(list()).getByRole("listitem", { name: "高雄 → 東京・2027 年 2 月" });
+    fireEvent.click(within(feb()).getByRole("button", { name: "暫停追蹤" }));
+    await waitFor(() => expect(feb()).toHaveTextContent("已暫停"));
+    const jan = within(list()).getByRole("listitem", { name: "高雄 → 東京・2027 年 1 月" });
+    expect(jan).toHaveTextContent("追蹤中");
+    fireEvent.click(within(jan).getByRole("button", { name: "刪除" }));
+    fireEvent.click(await screen.findByRole("button", { name: "確認刪除" }));
+    expect(await screen.findByText("我的航線訂閱：2 / 10")).toBeInTheDocument();
+    expect(feb()).toHaveTextContent("已暫停");
+    // The same month again is refused.
+    fill(createForm(), "KHH", "TYO", "8000", "2027-02");
+    fireEvent.click(within(createForm()).getByRole("button", { name: "開始追蹤" }));
+    expect(await within(createForm()).findByRole("alert")).toHaveTextContent(
+      "你已經訂閱過「高雄 → 東京」 2027 年 2 月出發的航線",
+    );
   });
 });
 
@@ -281,13 +328,18 @@ describe("editing and deleting", () => {
     fireEvent.click(within(item("台北 → 倫敦")).getByRole("button", { name: "編輯" }));
     let form = within(item("台北 → 倫敦")).getByRole("form", { name: "編輯訂閱" });
     pickDestination(form, "SYD");
+    fireEvent.change(within(form).getByLabelText("出發月份"), { target: { value: "2026-12" } });
     fireEvent.click(within(form).getByRole("button", { name: "儲存變更" }));
-    expect(await within(form).findByRole("alert")).toHaveTextContent("你已經訂閱過「台北 → 雪梨」");
+    expect(await within(form).findByRole("alert")).toHaveTextContent(
+      "你已經訂閱過「台北 → 雪梨」 2026 年 12 月出發的航線",
+    );
     form = within(item("台北 → 倫敦")).getByRole("form", { name: "編輯訂閱" });
     pickDestination(form, "PAR");
     fireEvent.click(within(form).getByRole("button", { name: "儲存變更" }));
-    expect(await screen.findByRole("listitem", { name: "台北 → 巴黎" })).toBeInTheDocument();
-    expect(screen.queryByRole("listitem", { name: "台北 → 倫敦" })).toBeNull();
+    expect(
+      await screen.findByRole("listitem", { name: startsWith("台北 → 巴黎") }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("listitem", { name: startsWith("台北 → 倫敦") })).toBeNull();
     expect(screen.getByText("我的航線訂閱：6 / 10")).toBeInTheDocument();
   });
 
@@ -299,7 +351,9 @@ describe("editing and deleting", () => {
     expect(item("台北 → 雪梨")).toBeInTheDocument();
     fireEvent.click(within(item("台北 → 雪梨")).getByRole("button", { name: "刪除" }));
     fireEvent.click(await screen.findByRole("button", { name: "確認刪除" }));
-    await waitFor(() => expect(screen.queryByRole("listitem", { name: "台北 → 雪梨" })).toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByRole("listitem", { name: startsWith("台北 → 雪梨") })).toBeNull(),
+    );
     expect(screen.getByText("我的航線訂閱：5 / 10")).toBeInTheDocument();
   });
 });
@@ -497,11 +551,37 @@ describe("mobile layout and accessibility", () => {
     expect(within(item("高雄 → 沖繩")).getByRole("button", { name: "恢復追蹤" })).toBeEnabled();
   });
 
-  it("tells users that one route can track one departure month", async () => {
+  it("explains that each month of a route is its own subscription", async () => {
     renderPage();
     await loaded();
-    expect(screen.getByRole("note", { name: "參考票價說明" })).toHaveTextContent(
-      "每條航線目前只能追蹤一個出發月份",
-    );
+    const note = screen.getByRole("note", { name: "參考票價說明" });
+    expect(note).toHaveTextContent("同一航線可以分別追蹤不同的出發月份，每個月份各算 1 筆訂閱");
+    expect(note).toHaveTextContent("同一天最多寄出一封通知");
+    expect(note).not.toHaveTextContent("只能追蹤一個出發月份");
+  });
+
+  it("shows a rolling row and a fixed row of the same month side by side", async () => {
+    renderPage({ scenario: "multi_month" });
+    await loaded();
+    const names = within(list())
+      .getAllByRole("listitem")
+      .map((li) => li.getAttribute("aria-label"))
+      .filter(Boolean);
+    expect(names).toEqual([
+      "高雄 → 東京・2027 年 1 月",
+      "高雄 → 東京・2027 年 2 月",
+      "高雄 → 東京・2027 年 3 月",
+      "台北 → 東京・每月滾動（2026 年 12 月）",
+      "台北 → 東京・2026 年 12 月",
+    ]);
+    const rolling = within(list()).getByRole("listitem", {
+      name: "台北 → 東京・每月滾動（2026 年 12 月）",
+    });
+    const fixed = within(list()).getByRole("listitem", { name: "台北 → 東京・2026 年 12 月" });
+    // Same route and month: the same reference fare, compared with each one's own target.
+    expect(fact(rolling, "參考票價（來源：Aviasales）")).toBe("約 NT$8,062");
+    expect(fact(fixed, "參考票價（來源：Aviasales）")).toBe("約 NT$8,062");
+    expect(fact(rolling, "與目標價相比")).toBe("低於目標價 NT$938");
+    expect(fact(fixed, "與目標價相比")).toBe("高於目標價 NT$62");
   });
 });

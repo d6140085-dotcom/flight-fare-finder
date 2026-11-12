@@ -1,7 +1,8 @@
 # ADR 0001 — M1.4 user-defined routes
 
 - **Status:** Accepted for Phase 0 (design only). Phases 1–5 each need separate approval.
-- **Date:** 2026-11-04; revised 2026-11-05 (D3 worldwide catalog, D4 total limit, D12–D14)
+- **Date:** 2026-11-04; revised 2026-11-05 (D3 worldwide catalog, D4 total limit, D12–D14);
+  amended 2026-11-12 (D1: several departure months per route, R-MM-1, owner-approved)
 - **Scope:** subscriptions API, fare check (wrapper/parser), front end, deployment.
   The notification Lambda, `notification_history`, deduplication, the SQS trigger and the
   EventBridge schedule are **out of scope and frozen**.
@@ -16,16 +17,52 @@ the notification path.
 
 ## Decisions
 
-### D1. Keep the `subscriptions` table and keys
-Key stays `email` (partition) + `route` (sort, `ORIG-DEST`). One subscription per user per
-route; "multiple subscriptions" means multiple routes. No migration: new attributes are
-optional and absent values have safe defaults.
+### D1. Keep the `subscriptions` table; one subscription per route **and departure month**
+*Amended 2026-11-12 (R-MM-1, owner-approved). The original text allowed one subscription per
+route pair, whatever the month; that is superseded.*
 
-New attributes: `alerts_paused` (bool, absent = not paused), `departure_month` (`YYYY-MM`,
-absent = legacy rolling next-month row, D12), `route_type` and display names are derived from
-the allowlist, `plan_name` becomes optional (kept on the two M1 rows), `previous_route` (set
-when a route is changed, for audit). One subscription per route pair, with one month: a
-different month is not a second subscription.
+The table and its key schema stay: `email` (partition) + `route` (sort). The **value** of the
+sort key identifies one subscription:
+
+- legacy rolling row (M1, no `departure_month`): `ORIG-DEST`, e.g. `KHH-TYO` — unchanged;
+- fixed-month row: `ORIG-DEST#YYYY-MM`, e.g. `KHH-TYO#2027-01`.
+
+Rules:
+- A user may hold several fixed months of one route (`KHH-TYO` 2027-01, 02 and 03 are three
+  subscriptions).
+- At most one subscription per user, route and fixed month, and at most one rolling row per
+  user and route. A rolling row may coexist with fixed months of its route, including the
+  month it currently resolves to (overlap policy below).
+- Every row counts toward the limit of 10 (D4), paused and expired included.
+
+The API's public, URL-safe subscription ID is the sort key with `#` replaced by `_`
+(`KHH-TYO_2027-01`). It is used in `PATCH`/`DELETE /subscriptions/{id}`. Authorisation is by
+the session's email (the partition), never by the ID. A route or month change moves the row to
+its new key in one transaction (D5). Mapping, rationale and tests:
+[m1.4-r-mm-1-multi-month.md](../m1.4-r-mm-1-multi-month.md).
+
+**Migration and compatibility.** No data migration: existing M1 rows keep their keys and stay
+rolling. New attributes are optional and absent values have safe defaults.
+
+New attributes:
+- `alerts_paused` (bool, absent = not paused);
+- `departure_month` (`YYYY-MM`, absent = legacy rolling next-month row, D12; on fixed rows it
+  always equals the key's month);
+- `origin` and `destination`;
+- `plan_name` becomes optional (kept on the two M1 rolling rows only);
+- `previous_route` (the previous sort key, set when a route or month is changed, for audit).
+
+`route_type` and display names are derived from the allowlist.
+
+**Rolling/fixed overlap.** The notification dedup stream stays (user, route pair, effective
+month) (Phase 2B-1). Subscriptions resolving to the same stream share it:
+- The fare check sends one message per user and stream, listing every matched subscription.
+- The notification Lambda sends if **any** listed subscription is still eligible. A paused,
+  expired or deleted one never suppresses another.
+- The M1 re-alert rule applies within the stream (no second email for the same fare).
+
+Full policy:
+[m1.4-r-mm-1-multi-month.md §4](../m1.4-r-mm-1-multi-month.md#4-rollingfixed-overlap-policy).
 
 ### D2. Pause is `alerts_paused`, never `subscription_status`
 `subscription_status` is reserved for M2's payment paywall. "Paused by the user" and "not paid"
@@ -180,8 +217,13 @@ Details: [Multi-Platform Flight Search Links](../m1.4-multi-platform-search-link
   the separate `subscription_quota` table.
 - **Active-only limit** (paused rows free a slot): rejected by the owner; a total limit is simpler
   to explain and keeps resume from ever failing.
-- **Departure month in the sort key** (several months per route): more flexible, but changes the
-  dedup key and needs a migration. Rejected; one month per route pair.
+- **Departure month in the sort key** (several months per route): originally rejected
+  ("changes the dedup key and needs a migration"). **Adopted 2026-11-12 (R-MM-1)** in a form
+  that needs neither:
+  - legacy rows keep their keys, so there is no migration;
+  - the dedup stream already includes the month (Phase 2B-1), so the dedup key is unchanged.
+- **Opaque subscription UUIDs** for R-MM-1: rejected. They would need a stored attribute and a
+  lookup on every request, and DynamoDB already enforces uniqueness on the deterministic key.
 - **Free-text airport search (Travelpayouts autocomplete)**: better UX, but unpopular routes
   often have no cached fares, and every keystroke would be an external request. Instead the UI
   searches the curated catalog locally (Chinese name, English name, IATA code, country or

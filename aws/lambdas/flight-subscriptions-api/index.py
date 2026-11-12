@@ -1,8 +1,10 @@
 """flight-subscriptions-api — M1.4 subscriptions API (docs/api/m1.4-subscriptions-api.md).
 
 API Gateway HTTP API (payload 2.0) routes handled:
-  GET /subscriptions, POST /subscriptions, PATCH /subscriptions/{route},
-  DELETE /subscriptions/{route}, and the legacy POST /subscribe (after cutover only).
+  GET /subscriptions, POST /subscriptions, PATCH /subscriptions/{id},
+  DELETE /subscriptions/{id}, and the legacy POST /subscribe (after cutover only).
+  {id} is the public subscription ID ("KHH-TYO" or "KHH-TYO_2027-01", subsapi/subkeys.py).
+  The older route keys with {route} are accepted too (same value space for legacy rows).
 Environment: SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, SUBSCRIPTIONS_TABLE, QUOTA_TABLE,
 optional MAX_SUBSCRIPTIONS and ALLOW_DIRECT_TEST_INVOKE ("true" only on a test function).
 Logs never contain email addresses, tokens or request bodies.
@@ -89,10 +91,10 @@ def handler(event, context):
             status, body = svc.list(email)
         elif key == "POST /subscriptions":
             status, body = svc.create(email, _body(event))
-        elif key == "PATCH /subscriptions/{route}":
-            status, body = svc.patch(email, params.get("route"), _body(event))
-        elif key == "DELETE /subscriptions/{route}":
-            status, body = svc.delete(email, params.get("route"), query.get("if_updated_at"))
+        elif key in ("PATCH /subscriptions/{id}", "PATCH /subscriptions/{route}"):
+            status, body = svc.patch(email, params.get("id", params.get("route")), _body(event))
+        elif key in ("DELETE /subscriptions/{id}", "DELETE /subscriptions/{route}"):
+            status, body = svc.delete(email, params.get("id", params.get("route")), query.get("if_updated_at"))
         elif key == "POST /subscribe":
             status, body = svc.legacy_subscribe(email, _body(event))
         else:

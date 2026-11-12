@@ -49,7 +49,7 @@ class DryRunEvaluator:
         self.settings, self.catalog, self.client, self.as_of, self.log = settings, catalog, client, as_of, log
 
     def __call__(self, item, rows):
-        ev = evaluate(item, client=self.client, rows=lambda: [r for r in rows if r.get("route") == item.route],
+        ev = evaluate(item, client=self.client, rows=lambda: [r for r in rows if workitems.route_pair(r) == item.route],
                       as_of=self.as_of, now=self.client.now, catalog=self.catalog, fetch_usd=self.settings.fetch_usd)
         out = {"key": item.key, "fare_check": status.api_view(ev.record), "rejected": ev.record["rejected"],
                "would_alert": len(ev.matched), "would_alert_targets": sorted(int(matching.target_of(r)) for r in ev.matched),
@@ -131,7 +131,9 @@ def run_parser(event, *, settings, catalog, token, reader, now, transport=None, 
         + (f", {ev.usd_offer.price} USD" if ev.usd_offer else ", no USD"))
     publisher = DryRunPublisher(log) if dry_run else SqsPublisher(settings.queue_url, client_factory, dry_run)
     v2_as_of = as_of if settings.message_version == 2 else None
-    bodies = [matching.message_body(r, item, o, ev.usd_offer, v2_as_of) for r in ev.matched]
+    # One message per user and stream: overlapping rolling + fixed rows of one user that both
+    # match produce one alert listing both subscriptions (R-MM-1 overlap policy).
+    bodies = matching.messages(ev.matched, item, o, ev.usd_offer, v2_as_of)
     for body in bodies:
         publisher.send(body)
     out.update({"cheapest_twd": o.price, "matched": len(bodies), "skipped": ev.skipped})

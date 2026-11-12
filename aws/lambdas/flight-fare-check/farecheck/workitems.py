@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import timezone
 
-from . import months
+from . import months, subkeys
 
 ACTIVE, PAUSED, EXPIRED, INVALID = "active", "paused", "expired", "invalid"
 
@@ -41,13 +41,27 @@ def iso_utc(dt):
 
 
 def route_codes(row):
-    """(origin, destination) from the row, falling back to splitting `route` (M1 rows)."""
-    route = row.get("route")
-    if not isinstance(route, str) or route.count("-") != 1:
+    """(origin, destination) of a row, or None if its key and attributes disagree.
+
+    The sort key `route` is "ORIG-DEST" (legacy rolling) or "ORIG-DEST#YYYY-MM" (fixed month,
+    R-MM-1, subkeys.py). Stored origin/destination must match the key's pair, and a fixed key's
+    month must match the stored departure_month: a row that disagrees is INVALID, never guessed."""
+    parts = subkeys.parse_key(row.get("route"))
+    if not parts:
         return None
-    o, d = route.split("-")
-    o, d = row.get("origin") or o, row.get("destination") or d
-    return (o, d) if f"{o}-{d}" == route else None
+    ko, kd, kmonth = parts
+    o, d = row.get("origin") or ko, row.get("destination") or kd
+    if (o, d) != (ko, kd):
+        return None
+    if kmonth is not None and row.get("departure_month") != kmonth:
+        return None
+    return o, d
+
+
+def route_pair(row):
+    """"ORIG-DEST" of a row ("KHH-TYO" for both "KHH-TYO" and "KHH-TYO#2027-01"), or None."""
+    codes = route_codes(row)
+    return subkeys.pair(*codes) if codes else None
 
 
 def classify(row, now, catalog):
