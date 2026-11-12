@@ -1,9 +1,11 @@
 // In-memory implementation of SubscriptionsClient for Phase 3A (development and preview only).
 // It follows the subscriptions API contract (docs/api/m1.4-subscriptions-api.md): the same
-// validation order and error codes, the strict 10-record limit, one route per user, atomic
-// route changes, optimistic concurrency on updated_at, and derived status/effective month.
+// validation order and error codes, the strict 10-record limit, one subscription per (route,
+// fixed month) plus one rolling row per route (R-MM-1), public IDs in update/remove, atomic
+// route and month changes, optimistic concurrency on updated_at, derived status/effective month.
 // It never calls fetch, Supabase or AWS, and every row and fare is fake demo data.
-import { POLICY, airport, routeKey } from "./catalog";
+import { POLICY, airport } from "./catalog";
+import { parseSubscriptionId, subscriptionId } from "./subscription-id";
 import { mockDataAllowed } from "./routes";
 import type { FareCheck } from "./fare-status";
 import { addMonths, currentMonth, effectiveMonth, selectableMonths } from "./months";
@@ -31,12 +33,14 @@ export type MockScenario =
   | "demo" // legacy rolling row, active/paused/expired rows, one of each fare state
   | "empty" // no subscriptions yet
   | "full" // 10 records: the limit is reached
+  | "multi_month" // several months of one route, plus a rolling/fixed overlap
   | "list_error" // GET /subscriptions fails (internal_error)
   | "unauthorized"; // GET /subscriptions answers 401
 
 export const MOCK_SCENARIOS: readonly { id: MockScenario; label: string }[] = [
   { id: "demo", label: "示範資料" },
   { id: "empty", label: "沒有訂閱" },
+  { id: "multi_month", label: "同航線多個月份" },
   { id: "full", label: "已達 10 筆上限" },
   { id: "list_error", label: "載入失敗" },
   { id: "unauthorized", label: "登入過期" },
@@ -112,6 +116,7 @@ function row(
 ): RouteSubscription {
   const [origin = "", destination = ""] = route.split("-");
   return {
+    id: subscriptionId(origin, destination, departure_month),
     route,
     origin,
     destination,
@@ -130,6 +135,7 @@ export function seedRows(scenario: MockScenario, now: Date): RouteSubscription[]
   const month = currentMonth(now);
   const plus = (n: number) => addMonths(month, n);
   if (scenario === "empty") return [];
+  if (scenario === "multi_month") return multiMonthRows(now);
   if (scenario === "full") {
     const dests = ["TYO", "OSA", "SEL", "BKK", "HKG", "SIN", "OKA", "MNL", "SGN", "KUL"];
     return dests.map((d, i) => row(`TPE-${d}`, plus(1 + (i % 12)), 5000 + i * 500));
@@ -141,6 +147,21 @@ export function seedRows(scenario: MockScenario, now: Date): RouteSubscription[]
     row("RMQ-SEL", plus(-1), 6000, { created_at: "2026-09-20T00:00:00.000Z" }), // expired
     row("TPE-LON", plus(3), 28000),
     row("TPE-SYD", plus(1), 18000),
+  ];
+}
+
+/** Demo with several months of one route beside the legacy rolling row (R-MM-1). */
+export function multiMonthRows(now: Date): RouteSubscription[] {
+  const plus = (n: number) => addMonths(currentMonth(now), n);
+  return [
+    row("TPE-TYO", null, 9000, { plan_name: "tokyo" }),
+    row("TPE-TYO", plus(1), 8000, { created_at: "2026-11-02T00:00:00.000Z" }), // = rolling's month
+    row("KHH-TYO", plus(2), 9000, { created_at: "2026-11-03T00:00:00.000Z" }),
+    row("KHH-TYO", plus(3), 9500, { created_at: "2026-11-03T00:00:00.000Z" }),
+    row("KHH-TYO", plus(4), 10000, {
+      created_at: "2026-11-03T00:00:00.000Z",
+      alerts_paused: true,
+    }),
   ];
 }
 
@@ -218,7 +239,13 @@ export class MockSubscriptionsClient implements SubscriptionsClient {
     if (this.scenario === "list_error") fail("internal_error");
     if (this.scenario === "unauthorized") fail("unauthorized");
     const now = this.now();
-    const subs = [...this.rows].sort((a, b) => a.created_at.localeCompare(b.created_at));
+    // Same order as the API: route pair, then rolling before fixed months, then month.
+    const subs = [...this.rows].sort(
+      (a, b) =>
+        a.route.localeCompare(b.route) ||
+        (a.departure_month ?? "").localeCompare(b.departure_month ?? "") ||
+        a.created_at.localeCompare(b.created_at),
+    );
     return {
       subscriptions: subs.map((r) => this.dto(r)),
       limits: { max: POLICY.maxSubscriptions, used: this.rows.length },
@@ -240,7 +267,16 @@ export class MockSubscriptionsClient implements SubscriptionsClient {
       editing ? { editing, now: this.now() } : { now: this.now() },
     );
     // §4.2: the first failure in the documented order wins.
-    if (!result.ok) return fail(result.errors[0] as ErrorCode);
+    if (!result.ok) {
+      const code = result.errors[0] as ErrorCode;
+      const month = /^\d{4}-\d{2}$/.test(input.month) ? input.month : null;
+      return fail(
+        code,
+        code === "duplicate_subscription"
+          ? { route: `${input.origin}-${input.destination}`, departure_month: month }
+          : {},
+      );
+    }
     return result.value;
   }
 
@@ -258,19 +294,20 @@ export class MockSubscriptionsClient implements SubscriptionsClient {
     );
     if (state.lastError) fail(state.lastError.code);
     this.rows = state.subs;
-    const created = this.rows.find((r) => r.route === routeKey(value.origin, value.destination));
-    return this.dto(created as RouteSubscription);
+    const id = subscriptionId(value.origin, value.destination, value.departure_month);
+    return this.dto(this.rows.find((r) => r.id === id) as RouteSubscription);
   }
 
-  async update(route: string, patch: PatchRequest): Promise<SubscriptionDto> {
+  /** `id` is the public subscription ID ("KHH-TYO" or "KHH-TYO_2027-01"). */
+  async update(id: string, patch: PatchRequest): Promise<SubscriptionDto> {
     await this.delay();
-    if (!/^[A-Z]{3}-[A-Z]{3}$/.test(route)) fail("invalid_route");
+    if (!parseSubscriptionId(id)) fail("invalid_route");
     const keys = Object.keys(patch).filter((k) => k !== "if_updated_at");
     if (keys.length === 0) fail("empty_patch");
     if ((patch.origin === undefined) !== (patch.destination === undefined)) {
       fail("route_change_incomplete");
     }
-    const old = this.rows.find((r) => r.route === route);
+    const old = this.rows.find((r) => r.id === id);
     if (!old) return fail("not_found");
     if (patch.if_updated_at !== undefined && patch.if_updated_at !== old.updated_at) {
       fail("conflict");
@@ -293,37 +330,36 @@ export class MockSubscriptionsClient implements SubscriptionsClient {
       );
       const state = reducer(
         { subs: this.rows, lastError: null },
-        { type: "edit", route, value, now: this.stamp() },
+        { type: "edit", id, value, now: this.stamp() },
       );
       if (state.lastError) fail(state.lastError.code);
       this.rows = state.subs;
-      current = this.rows.find(
-        (r) => r.route === routeKey(value.origin, value.destination),
-      ) as RouteSubscription;
+      const newId = subscriptionId(value.origin, value.destination, value.departure_month);
+      current = this.rows.find((r) => r.id === newId) as RouteSubscription;
     }
     if (patch.alerts_paused !== undefined) {
       if (typeof patch.alerts_paused !== "boolean") fail("invalid_alerts_paused");
       const state = reducer(
         { subs: this.rows, lastError: null },
-        { type: patch.alerts_paused ? "pause" : "resume", route: current.route, now: this.stamp() },
+        { type: patch.alerts_paused ? "pause" : "resume", id: current.id, now: this.stamp() },
       );
       this.rows = state.subs;
-      current = this.rows.find((r) => r.route === current.route) as RouteSubscription;
+      current = this.rows.find((r) => r.id === current.id) as RouteSubscription;
     }
     return this.dto(current);
   }
 
-  async remove(route: string, ifUpdatedAt?: string): Promise<void> {
+  async remove(id: string, ifUpdatedAt?: string): Promise<void> {
     await this.delay();
-    if (!/^[A-Z]{3}-[A-Z]{3}$/.test(route)) fail("invalid_route");
-    const old = this.rows.find((r) => r.route === route);
+    if (!parseSubscriptionId(id)) fail("invalid_route");
+    const old = this.rows.find((r) => r.id === id);
     if (!old) return fail("not_found");
     if (ifUpdatedAt !== undefined && ifUpdatedAt !== old.updated_at) fail("conflict");
-    this.rows = this.rows.filter((r) => r.route !== route);
+    this.rows = this.rows.filter((r) => r.id !== id);
   }
 
   /** Test/development hook: simulate another tab changing a row (next write gets `conflict`). */
-  touch(route: string): void {
-    this.rows = this.rows.map((r) => (r.route === route ? { ...r, updated_at: this.stamp() } : r));
+  touch(id: string): void {
+    this.rows = this.rows.map((r) => (r.id === id ? { ...r, updated_at: this.stamp() } : r));
   }
 }

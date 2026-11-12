@@ -6,7 +6,7 @@ import { ORIGINS, DESTINATIONS } from "./catalog";
 
 // 2026-11-11 10:00 Taipei: selectable months 2026-12 … 2027-11; rolling rows check 2026-12.
 const NOW = new Date("2026-11-11T02:00:00Z");
-const mock = (scenario: "demo" | "empty" | "full" = "demo") =>
+const mock = (scenario: "demo" | "empty" | "full" | "multi_month" = "demo") =>
   new MockSubscriptionsClient({ now: () => NOW, scenario });
 
 async function code(p: Promise<unknown>) {
@@ -66,8 +66,68 @@ describe("mock subscriptions API (contract docs/api/m1.4-subscriptions-api.md)",
     expect(await code(c.create({ ...base, target_price: 0 }))).toBe("invalid_target_price");
     expect(await code(c.create({ ...base, target_price: 12.5 }))).toBe("invalid_target_price");
     const created = await c.create(base);
-    expect(created).toMatchObject({ month_mode: "fixed", alerts_paused: false, fare_check: null });
-    expect(await code(c.create({ ...base, departure_month: "2027-02" }))).toBe(
+    expect(created).toMatchObject({
+      id: "KHH-OKA_2027-01",
+      route: "KHH-OKA",
+      month_mode: "fixed",
+      alerts_paused: false,
+      fare_check: null,
+    });
+    expect(await code(c.create(base))).toBe("duplicate_subscription");
+    try {
+      await c.create(base);
+    } catch (e) {
+      expect((e as ApiError).details).toEqual({ route: "KHH-OKA", departure_month: "2027-01" });
+    }
+  });
+
+  it("holds several months of one route as independent subscriptions (R-MM-1)", async () => {
+    const c = mock("empty");
+    const ids = [];
+    for (const m of ["2027-01", "2027-02", "2027-03"]) {
+      ids.push(
+        (
+          await c.create({
+            origin: "KHH",
+            destination: "TYO",
+            departure_month: m,
+            target_price: 9000,
+          })
+        ).id,
+      );
+    }
+    expect(ids).toEqual(["KHH-TYO_2027-01", "KHH-TYO_2027-02", "KHH-TYO_2027-03"]);
+    expect((await c.list()).limits.used).toBe(3);
+    await c.update("KHH-TYO_2027-02", { alerts_paused: true });
+    await c.remove("KHH-TYO_2027-01");
+    const left = (await c.list()).subscriptions.map((s) => [s.id, s.status]);
+    expect(left).toEqual([
+      ["KHH-TYO_2027-02", "paused"],
+      ["KHH-TYO_2027-03", "active"],
+    ]);
+    // Moving a month onto a sibling month is a duplicate; onto a free month it moves the ID.
+    expect(await code(c.update("KHH-TYO_2027-03", { departure_month: "2027-02" }))).toBe(
+      "duplicate_subscription",
+    );
+    const moved = await c.update("KHH-TYO_2027-03", { departure_month: "2027-05" });
+    expect(moved.id).toBe("KHH-TYO_2027-05");
+    expect(await code(c.update("KHH-TYO_2027-03", { target_price: 1 }))).toBe("not_found");
+  });
+
+  it("keeps the rolling row beside a fixed row of the same month", async () => {
+    const c = mock("multi_month");
+    const subs = (await c.list()).subscriptions;
+    expect(subs.map((s) => [s.id, s.effective_month, s.status])).toEqual([
+      ["KHH-TYO_2027-01", "2027-01", "active"],
+      ["KHH-TYO_2027-02", "2027-02", "active"],
+      ["KHH-TYO_2027-03", "2027-03", "paused"],
+      ["TPE-TYO", "2026-12", "active"],
+      ["TPE-TYO_2026-12", "2026-12", "active"],
+    ]);
+    // Both resolve to the same route/month fare check.
+    const tyo = subs.filter((s) => s.route === "TPE-TYO").map((s) => s.fare_check?.kind);
+    expect(tyo).toEqual(["ok", "ok"]);
+    expect(await code(c.update("TPE-TYO", { departure_month: "2026-12" }))).toBe(
       "duplicate_subscription",
     );
   });
@@ -82,9 +142,12 @@ describe("mock subscriptions API (contract docs/api/m1.4-subscriptions-api.md)",
       target_price: 3000,
     };
     expect(await code(c.create(req))).toBe("limit_reached");
-    await c.update("TPE-TYO", { alerts_paused: true });
+    await c.update("TPE-TYO_2026-12", { alerts_paused: true });
     expect(await code(c.create(req))).toBe("limit_reached");
-    await c.remove("TPE-TYO");
+    expect(await code(c.create({ ...req, origin: "TPE", destination: "TYO" }))).toBe(
+      "limit_reached", // another month of an existing route counts as a new record
+    );
+    await c.remove("TPE-TYO_2026-12");
     await c.create(req);
     expect((await c.list()).limits.used).toBe(10);
   });
@@ -94,28 +157,37 @@ describe("mock subscriptions API (contract docs/api/m1.4-subscriptions-api.md)",
     const kept = await c.update("TPE-TYO", { target_price: 8500 });
     expect(kept).toMatchObject({ month_mode: "rolling", target_price: 8500, plan_name: "tokyo" });
     const fixed = await c.update("TPE-TYO", { departure_month: "2027-03" });
-    expect(fixed).toMatchObject({ month_mode: "fixed", departure_month: "2027-03" });
+    expect(fixed).toMatchObject({
+      id: "TPE-TYO_2027-03",
+      month_mode: "fixed",
+      departure_month: "2027-03",
+      plan_name: null,
+    });
     expect(fixed.fare_check).toBeNull(); // a new month starts unchecked
-    expect(await code(c.update("TPE-TYO", { departure_month: null }))).toBe(
+    expect(await code(c.update("TPE-TYO_2027-03", { departure_month: null }))).toBe(
       "invalid_departure_month",
     );
+    expect(await code(c.update("TPE-TYO", { target_price: 1 }))).toBe("not_found");
   });
 
   it("reactivates an expired row by choosing a month in the window (§3.3)", async () => {
     const c = mock();
-    expect(await code(c.update("RMQ-SEL", { departure_month: "2026-10" }))).toBe("no-error");
-    const row = await c.update("RMQ-SEL", { departure_month: "2027-02" });
-    expect(row.status).toBe("active");
+    expect(await code(c.update("RMQ-SEL_2026-10", { departure_month: "2026-10" }))).toBe(
+      "no-error",
+    );
+    const row = await c.update("RMQ-SEL_2026-10", { departure_month: "2027-02" });
+    expect([row.id, row.status]).toEqual(["RMQ-SEL_2027-02", "active"]);
   });
 
   it("changes a route atomically and rejects a change onto an existing route (§6)", async () => {
     const c = mock();
-    expect(await code(c.update("TPE-LON", { origin: "TPE" }))).toBe("route_change_incomplete");
-    expect(await code(c.update("TPE-LON", { origin: "TPE", destination: "SYD" }))).toBe(
-      "duplicate_subscription",
-    );
-    const moved = await c.update("TPE-LON", { origin: "TPE", destination: "PAR" });
-    expect(moved.route).toBe("TPE-PAR");
+    const lon = "TPE-LON_2027-02";
+    expect(await code(c.update(lon, { origin: "TPE" }))).toBe("route_change_incomplete");
+    expect(
+      await code(c.update(lon, { origin: "TPE", destination: "SYD", departure_month: "2026-12" })),
+    ).toBe("duplicate_subscription");
+    const moved = await c.update(lon, { origin: "TPE", destination: "PAR" });
+    expect([moved.id, moved.route]).toEqual(["TPE-PAR_2027-02", "TPE-PAR"]);
     const routes = (await c.list()).subscriptions.map((s) => s.route);
     expect(routes).toContain("TPE-PAR");
     expect(routes).not.toContain("TPE-LON");
@@ -125,14 +197,17 @@ describe("mock subscriptions API (contract docs/api/m1.4-subscriptions-api.md)",
   it("detects concurrent changes with if_updated_at and reports missing rows (§4.3, §4.4)", async () => {
     const c = mock();
     const before = (await c.list()).subscriptions.find((s) => s.route === "TPE-SYD");
-    c.touch("TPE-SYD");
+    const syd = "TPE-SYD_2026-12";
+    c.touch(syd);
     expect(
-      await code(c.update("TPE-SYD", { target_price: 1, if_updated_at: before?.updated_at ?? "" })),
+      await code(c.update(syd, { target_price: 1, if_updated_at: before?.updated_at ?? "" })),
     ).toBe("conflict");
-    expect(await code(c.remove("TPE-SYD", before?.updated_at))).toBe("conflict");
+    expect(await code(c.remove(syd, before?.updated_at))).toBe("conflict");
     expect(await code(c.remove("TPE-ZZZ"))).toBe("not_found");
-    expect(await code(c.remove("bad"))).toBe("invalid_route");
-    expect(await code(c.update("TPE-SYD", {}))).toBe("empty_patch");
+    for (const bad of ["bad", "TPE-SYD#2026-12", "TPE-SYD%232026-12", "TPE-SYD_2026-1"]) {
+      expect(await code(c.remove(bad))).toBe("invalid_route");
+    }
+    expect(await code(c.update(syd, {}))).toBe("empty_patch");
   });
 
   it("simulates list failures without touching the network", async () => {

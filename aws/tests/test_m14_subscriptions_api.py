@@ -31,7 +31,7 @@ import ddb_local  # noqa: E402  (must come before anything imports boto3)
 API_DIR = Path(__file__).resolve().parents[1] / "lambdas" / "flight-subscriptions-api"
 sys.path.insert(0, str(API_DIR))
 from subsapi import config as config_mod  # noqa: E402
-from subsapi import months, validation  # noqa: E402
+from subsapi import months, subkeys, validation  # noqa: E402
 from subsapi.auth import resolve_email  # noqa: E402
 from subsapi.errors import ApiError  # noqa: E402
 from subsapi.messages import message  # noqa: E402
@@ -50,6 +50,16 @@ DESTS = ["OSA", "NGO", "FUK", "OKA", "SPK", "KMJ", "PUS", "CJU", "HKG", "MFM", "
          "MUC", "AMS", "ZRH", "VIE", "ROM", "MIL", "NYC", "LAX", "SFO", "SEA", "SYD", "MEL", "AKL",
          "ZQN", "BER", "GVA", "VCE", "FLR", "MAD", "BCN", "LIS", "OPO", "PRG", "BUD", "CPH", "STO",
          "OSL", "HEL", "DUB", "ATH", "IST", "CHI", "BOS", "WAS"]
+
+
+def fid(dest, month="2027-01", origin="TPE"):
+    """Public subscription ID of a fixed-month row (R-MM-1): "TPE-LON_2027-01"."""
+    return f"{origin}-{dest}_{month}"
+
+
+def fkey(dest, month="2027-01", origin="TPE"):
+    """DynamoDB sort key of a fixed-month row: "TPE-LON#2027-01"."""
+    return f"{origin}-{dest}#{month}"
 
 
 # =============================================================================================
@@ -135,6 +145,14 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(self.code(validation.route_param, "tpe-tyo"), "invalid_route")
         self.assertEqual(validation.route_param("TPE-TYO"), "TPE-TYO")
 
+    def test_subscription_id_param(self):
+        ip = validation.id_param
+        self.assertEqual(ip("TPE-TYO"), "TPE-TYO")  # legacy rolling row: unchanged ID
+        self.assertEqual(ip("KHH-TYO_2027-01"), "KHH-TYO#2027-01")
+        for bad in ("KHH-TYO#2027-01", "KHH-TYO%232027-01", "KHH-TYO_2027-13", "KHH-TYO_2027-1", "khh-tyo",
+                    "KHH-TYO_", "KHH-TYO_2027-01_2027-02", "../KHH-TYO", "", None, 1):
+            self.assertEqual(self.code(ip, bad), "invalid_route", bad)
+
     def test_legacy_target_keeps_m1_rules(self):
         self.assertEqual(validation.legacy_target_price(CFG, 9000.0), 9000)
         for t in (9000.5, True, "9000", 0):
@@ -143,8 +161,10 @@ class ValidationTests(unittest.TestCase):
 
 class MessageTests(unittest.TestCase):
     def test_traditional_chinese_messages(self):
-        self.assertEqual(message("duplicate_subscription", CFG, NOW, {"route": "TPE-LON"}),
-                         "你已經訂閱過「台北 → 倫敦」這條航線（每條航線只能訂閱一個月份）。")
+        self.assertEqual(message("duplicate_subscription", CFG, NOW, {"route": "TPE-LON", "departure_month": "2027-03"}),
+                         "你已經訂閱過「台北 → 倫敦」 2027 年 3 月出發的航線，同一航線同一月份只能訂閱一次。")
+        self.assertEqual(message("duplicate_subscription", CFG, NOW, {"route": "TPE-TYO", "departure_month": None}),
+                         "你已經訂閱過「台北 → 東京」（每月滾動）出發的航線，同一航線同一月份只能訂閱一次。")
         self.assertEqual(message("invalid_departure_month", CFG, NOW),
                          "請選擇 2026 年 12 月 到 2027 年 11 月 之間的出發月份。")
         self.assertIn("最多 10 筆航線訂閱（已暫停與已過期的訂閱也算在內）", message("limit_reached", CFG, NOW))
@@ -430,11 +450,11 @@ class LocalDynamoTestCase(unittest.TestCase):
         return self.call("POST /subscriptions", {"origin": origin, "destination": dest,
                                                  "departure_month": month, "target_price": target}, token=token)
 
-    def patch(self, route, body, token="good"):
-        return self.call("PATCH /subscriptions/{route}", body, path={"route": route}, token=token)
+    def patch(self, sub_id, body, token="good"):
+        return self.call("PATCH /subscriptions/{id}", body, path={"id": sub_id}, token=token)
 
-    def delete(self, route, if_updated_at=None):
-        return self.call("DELETE /subscriptions/{route}", path={"route": route},
+    def delete(self, sub_id, if_updated_at=None):
+        return self.call("DELETE /subscriptions/{id}", path={"id": sub_id},
                          query={"if_updated_at": if_updated_at} if if_updated_at else None)
 
     def raw(self, email=USER):
@@ -478,7 +498,7 @@ class CrudTests(LocalDynamoTestCase):
         status, body = self.create("LON", month="2027-03", target=28000)
         self.assertEqual(status, 201)
         self.assertEqual(body | {"created_at": None, "updated_at": None}, {
-            "route": "TPE-LON", "origin": "TPE", "destination": "LON",
+            "id": "TPE-LON_2027-03", "route": "TPE-LON", "origin": "TPE", "destination": "LON",
             "origin_name": {"zh": "台北", "en": "Taipei"}, "destination_name": {"zh": "倫敦", "en": "London"},
             "departure_month": "2027-03", "month_mode": "fixed", "effective_month": "2027-03",
             "status": "active", "target_price": 28000, "currency": "TWD", "alerts_paused": False,
@@ -514,17 +534,41 @@ class CrudTests(LocalDynamoTestCase):
     def test_identity_from_session_only(self):
         self.call("POST /subscriptions", {"origin": "TPE", "destination": "LON", "departure_month": "2027-01",
                                           "target_price": 1, "email": OTHER})
-        self.assertIn("TPE-LON", self.raw(USER))
+        self.assertIn("TPE-LON#2027-01", self.raw(USER))
         self.assertEqual(self.raw(OTHER), {})
         self.assertEqual(self.call("GET /subscriptions", token=None)[0], 401)
         self.assertEqual(self.call("GET /subscriptions", token="forged")[1]["error"], "unauthorized")
         self.assertEqual(self.call("GET /subscriptions", token="other")[1]["subscriptions"], [])
 
-    def test_duplicate_route_even_with_another_month(self):
+    def test_several_months_of_one_route_are_independent(self):
+        """R-MM-1: KHH-TYO for 2027-01, -02 and -03 are three subscriptions, three records."""
+        ids = []
+        for m in ("2027-01", "2027-02", "2027-03"):
+            status, body = self.create("TYO", month=m, origin="KHH", target=9000 + int(m[-1]))
+            self.assertEqual(status, 201, m)
+            ids.append(body["id"])
+        self.assertEqual(ids, ["KHH-TYO_2027-01", "KHH-TYO_2027-02", "KHH-TYO_2027-03"])
+        self.assertEqual(sorted(self.raw()), ["KHH-TYO#2027-01", "KHH-TYO#2027-02", "KHH-TYO#2027-03"])
+        self.assertEqual(self.quota()["count"], 3)
+        listing = self.call("GET /subscriptions")[1]
+        self.assertEqual([(s["id"], s["route"], s["departure_month"], s["target_price"])
+                          for s in listing["subscriptions"]],
+                         [("KHH-TYO_2027-01", "KHH-TYO", "2027-01", 9001), ("KHH-TYO_2027-02", "KHH-TYO", "2027-02", 9002),
+                          ("KHH-TYO_2027-03", "KHH-TYO", "2027-03", 9003)])
+        self.assertEqual(listing["limits"]["used"], 3)
+        # Each one is edited and deleted on its own.
+        self.assertEqual(self.patch("KHH-TYO_2027-02", {"alerts_paused": True})[1]["status"], "paused")
+        self.assertEqual(self.delete("KHH-TYO_2027-01")[0], 204)
+        statuses = {s["id"]: s["status"] for s in self.call("GET /subscriptions")[1]["subscriptions"]}
+        self.assertEqual(statuses, {"KHH-TYO_2027-02": "paused", "KHH-TYO_2027-03": "active"})
+        self.assertEqual(self.quota()["count"], 2)
+
+    def test_duplicate_route_and_month(self):
         self.create("LON", month="2027-01")
-        status, body = self.create("LON", month="2027-05")
+        status, body = self.create("LON", month="2027-01")
         self.assertEqual((status, body["error"]), (409, "duplicate_subscription"))
-        self.assertIn("台北 → 倫敦", body["message"])
+        self.assertEqual(body["details"], {"route": "TPE-LON", "departure_month": "2027-01"})
+        self.assertIn("台北 → 倫敦」 2027 年 1 月", body["message"])
         self.assertEqual(self.quota()["count"], 1)
 
     def test_unknown_route_key(self):
@@ -542,9 +586,9 @@ class LimitTests(LocalDynamoTestCase):
         for d in DESTS[:6]:
             self.create(d)
         for d in DESTS[6:8]:
-            self.seed(USER, f"TPE-{d}", alerts_paused=True, departure_month="2027-02")
+            self.seed(USER, fkey(d, "2027-02"), alerts_paused=True, departure_month="2027-02")
         for d in DESTS[8:10]:
-            self.seed(USER, f"TPE-{d}", departure_month="2026-05")  # expired
+            self.seed(USER, fkey(d, "2026-05"), departure_month="2026-05")  # expired
         status, body = self.create("LON")
         self.assertEqual((status, body["error"]), (409, "limit_reached"))
         self.assertEqual(body["details"], {"max": 10, "used": 10})
@@ -556,11 +600,12 @@ class LimitTests(LocalDynamoTestCase):
         for d in DESTS[:10]:
             self.assertEqual(self.create(d)[0], 201)
         before = self.quota()
-        self.assertEqual(self.patch("TPE-OSA", {"alerts_paused": True})[0], 200)
+        self.assertEqual(self.patch(fid("OSA"), {"alerts_paused": True})[0], 200)
         self.assertEqual(self.create("LON")[1]["error"], "limit_reached")
-        self.assertEqual(self.patch("TPE-OSA", {"alerts_paused": False})[0], 200)  # resume needs no slot
+        self.assertEqual(self.create("OSA", month="2027-02")[1]["error"], "limit_reached")  # another month counts too
+        self.assertEqual(self.patch(fid("OSA"), {"alerts_paused": False})[0], 200)  # resume needs no slot
         self.assertEqual(self.quota(), before)  # pause/resume never touch the quota
-        self.assertEqual(self.delete("TPE-OSA")[0], 204)
+        self.assertEqual(self.delete(fid("OSA"))[0], 204)
         self.assertEqual(self.quota()["count"], 9)
         self.assertEqual(self.create("LON")[0], 201)
         self.assertEqual(self.create("PAR")[1]["error"], "limit_reached")
@@ -578,55 +623,82 @@ class PatchTests(LocalDynamoTestCase):
     def setUp(self):
         super().setUp()
         _, self.row = self.create("LON", month="2027-01", target=28000)
+        self.id = self.row["id"]
 
     def test_target_and_month(self):
-        status, body = self.patch("TPE-LON", {"target_price": 25000, "departure_month": "2027-06"})
+        status, body = self.patch(self.id, {"target_price": 25000, "departure_month": "2027-06"})
         self.assertEqual(status, 200)
-        self.assertEqual((body["target_price"], body["departure_month"]), (25000, "2027-06"))
+        self.assertEqual((body["id"], body["target_price"], body["departure_month"]), ("TPE-LON_2027-06", 25000, "2027-06"))
         self.assertGreater(body["updated_at"], self.row["updated_at"])
-        self.assertEqual(body["created_at"], self.row["created_at"])
-        self.assertEqual(self.raw()["TPE-LON"]["departure_month"], "2027-06")
+        self.assertEqual(body["created_at"], self.row["created_at"])  # same subscription, new month
+        rows = self.raw()
+        self.assertEqual(sorted(rows), ["TPE-LON#2027-06"])  # the sort key moved with the month
+        self.assertEqual((rows["TPE-LON#2027-06"]["departure_month"], rows["TPE-LON#2027-06"]["previous_route"]),
+                         ("2027-06", "TPE-LON#2027-01"))
+        self.assertEqual((self.quota()["count"], self.quota()["version"]), (1, 1))  # quota untouched
+
+    def test_target_only_edit_keeps_the_id(self):
+        status, body = self.patch(self.id, {"target_price": 25000})
+        self.assertEqual((status, body["id"]), (200, self.id))
+        self.assertEqual(sorted(self.raw()), ["TPE-LON#2027-01"])
+
+    def test_month_change_onto_an_existing_month_is_a_duplicate(self):
+        self.create("LON", month="2027-02")
+        status, body = self.patch(self.id, {"departure_month": "2027-02"})
+        self.assertEqual((status, body["error"]), (409, "duplicate_subscription"))
+        self.assertEqual(sorted(self.raw()), ["TPE-LON#2027-01", "TPE-LON#2027-02"])
 
     def test_pause_resume_stores_flag_only_when_true(self):
-        self.assertTrue(self.patch("TPE-LON", {"alerts_paused": True})[1]["alerts_paused"])
-        self.assertIs(self.raw()["TPE-LON"]["alerts_paused"], True)
-        body = self.patch("TPE-LON", {"alerts_paused": False})[1]
+        self.assertTrue(self.patch(self.id, {"alerts_paused": True})[1]["alerts_paused"])
+        self.assertIs(self.raw()["TPE-LON#2027-01"]["alerts_paused"], True)
+        body = self.patch(self.id, {"alerts_paused": False})[1]
         self.assertEqual((body["alerts_paused"], body["status"]), (False, "active"))
-        self.assertNotIn("alerts_paused", self.raw()["TPE-LON"])
+        self.assertNotIn("alerts_paused", self.raw()["TPE-LON#2027-01"])
+
+    def test_paused_month_change_stays_paused(self):
+        self.patch(self.id, {"alerts_paused": True})
+        body = self.patch(self.id, {"departure_month": "2027-04"})[1]
+        self.assertEqual((body["id"], body["status"]), ("TPE-LON_2027-04", "paused"))
 
     def test_no_op_writes_nothing(self):
-        status, body = self.patch("TPE-LON", {"target_price": 28000, "departure_month": "2027-01"})
+        status, body = self.patch(self.id, {"target_price": 28000, "departure_month": "2027-01"})
         self.assertEqual((status, body["updated_at"]), (200, self.row["updated_at"]))
 
     def test_cannot_return_to_rolling_or_leave_the_window(self):
-        self.assertEqual(self.patch("TPE-LON", {"departure_month": None})[1]["error"], "invalid_departure_month")
-        self.assertEqual(self.patch("TPE-LON", {"departure_month": "2028-01"})[1]["error"], "invalid_departure_month")
+        self.assertEqual(self.patch(self.id, {"departure_month": None})[1]["error"], "invalid_departure_month")
+        self.assertEqual(self.patch(self.id, {"departure_month": "2028-01"})[1]["error"], "invalid_departure_month")
 
     def test_route_change_is_atomic(self):
-        self.patch("TPE-LON", {"alerts_paused": True})
-        status, body = self.patch("TPE-LON", {"origin": "KHH", "destination": "PAR", "target_price": 30000})
+        self.patch(self.id, {"alerts_paused": True})
+        status, body = self.patch(self.id, {"origin": "KHH", "destination": "PAR", "target_price": 30000})
         self.assertEqual(status, 200)
-        self.assertEqual((body["route"], body["status"], body["departure_month"]), ("KHH-PAR", "paused", "2027-01"))
+        self.assertEqual((body["id"], body["route"], body["status"], body["departure_month"]),
+                         ("KHH-PAR_2027-01", "KHH-PAR", "paused", "2027-01"))
         rows = self.raw()
-        self.assertEqual(sorted(rows), ["KHH-PAR"])
-        self.assertEqual(rows["KHH-PAR"]["previous_route"], "TPE-LON")
-        self.assertNotEqual(rows["KHH-PAR"]["created_at"], self.row["created_at"])
+        self.assertEqual(sorted(rows), ["KHH-PAR#2027-01"])
+        self.assertEqual(rows["KHH-PAR#2027-01"]["previous_route"], "TPE-LON#2027-01")
+        self.assertNotEqual(rows["KHH-PAR#2027-01"]["created_at"], self.row["created_at"])
         self.assertEqual(self.quota()["count"], 1)  # unchanged, and untouched
         self.assertEqual(self.quota()["version"], 1)
 
-    def test_route_change_onto_existing_route(self):
+    def test_route_change_onto_existing_route_and_month(self):
         self.create("PAR")
-        status, body = self.patch("TPE-LON", {"origin": "TPE", "destination": "PAR"})
+        status, body = self.patch(self.id, {"origin": "TPE", "destination": "PAR"})
         self.assertEqual((status, body["error"]), (409, "duplicate_subscription"))
-        self.assertEqual(sorted(self.raw()), ["TPE-LON", "TPE-PAR"])
+        self.assertEqual(sorted(self.raw()), ["TPE-LON#2027-01", "TPE-PAR#2027-01"])
+        # The same route in another month is fine.
+        body = self.patch(self.id, {"origin": "TPE", "destination": "PAR", "departure_month": "2027-03"})[1]
+        self.assertEqual(body["id"], "TPE-PAR_2027-03")
 
     def test_optimistic_concurrency(self):
-        status, body = self.patch("TPE-LON", {"target_price": 1, "if_updated_at": "2020-01-01T00:00:00.000Z"})
+        status, body = self.patch(self.id, {"target_price": 1, "if_updated_at": "2020-01-01T00:00:00.000Z"})
         self.assertEqual((status, body["error"]), (409, "conflict"))
-        ok = self.patch("TPE-LON", {"target_price": 2, "if_updated_at": self.row["updated_at"]})
+        ok = self.patch(self.id, {"target_price": 2, "if_updated_at": self.row["updated_at"]})
         self.assertEqual(ok[0], 200)
-        stale = self.patch("TPE-LON", {"target_price": 3, "if_updated_at": self.row["updated_at"]})
+        stale = self.patch(self.id, {"target_price": 3, "if_updated_at": self.row["updated_at"]})
         self.assertEqual(stale[1]["error"], "conflict")
+        stale_month = self.patch(self.id, {"departure_month": "2027-04", "if_updated_at": self.row["updated_at"]})
+        self.assertEqual(stale_month[1]["error"], "conflict")
 
     def test_concurrent_change_between_read_and_write_is_a_conflict(self):
         real_get = self.store.get_row
@@ -637,22 +709,44 @@ class PatchTests(LocalDynamoTestCase):
             return row
 
         with mock.patch.object(self.store, "get_row", side_effect=get_then_someone_edits):
-            status, body = self.patch("TPE-LON", {"target_price": 5})
+            status, body = self.patch(self.id, {"target_price": 5})
         self.assertEqual((status, body["error"]), (409, "conflict"))
+
+    def test_concurrent_change_before_a_month_change_is_a_conflict(self):
+        real_get, seen = self.store.get_row, {"n": 0}
+
+        def get_then_someone_edits(email, route):
+            row = real_get(email, route)
+            seen["n"] += 1
+            if seen["n"] == 1:
+                self.store.update(email, route, {"target_price": 1, "updated_at": "2099-01-01T00:00:00.000Z"}, [])
+            return row
+
+        with mock.patch.object(self.store, "get_row", side_effect=get_then_someone_edits):
+            status, body = self.patch(self.id, {"departure_month": "2027-04"})
+        self.assertEqual((status, body["error"]), (409, "conflict"))
+        self.assertEqual(sorted(self.raw()), ["TPE-LON#2027-01"])
 
     def test_shape_errors_and_missing_rows(self):
-        self.assertEqual(self.patch("TPE-LON", {})[1]["error"], "empty_patch")
-        self.assertEqual(self.patch("TPE-LON", {"origin": "KHH"})[1]["error"], "route_change_incomplete")
-        self.assertEqual(self.patch("TPE-LON", {"nope": 1})[1]["error"], "unknown_field")
-        self.assertEqual(self.patch("TPE-PAR", {"target_price": 1})[0], 404)
-        self.assertEqual(self.patch("bad", {"target_price": 1})[1]["error"], "invalid_route")
+        self.assertEqual(self.patch(self.id, {})[1]["error"], "empty_patch")
+        self.assertEqual(self.patch(self.id, {"origin": "KHH"})[1]["error"], "route_change_incomplete")
+        self.assertEqual(self.patch(self.id, {"nope": 1})[1]["error"], "unknown_field")
+        self.assertEqual(self.patch(fid("PAR"), {"target_price": 1})[0], 404)
+        self.assertEqual(self.patch("TPE-LON", {"target_price": 1})[0], 404)  # the rolling ID is another row
+        self.assertEqual(self.patch("TPE-LON_2027-02", {"target_price": 1})[0], 404)
+        for bad in ("bad", "TPE-LON#2027-01", "TPE-LON%232027-01"):
+            self.assertEqual(self.patch(bad, {"target_price": 1})[1]["error"], "invalid_route", bad)
 
     def test_delete(self):
-        status, body = self.delete("TPE-LON", if_updated_at="2020-01-01T00:00:00.000Z")
+        status, body = self.delete(self.id, if_updated_at="2020-01-01T00:00:00.000Z")
         self.assertEqual((status, body["error"]), (409, "conflict"))
-        self.assertEqual(self.delete("TPE-LON", if_updated_at=self.row["updated_at"])[0], 204)
-        self.assertEqual(self.delete("TPE-LON")[0], 404)
+        self.assertEqual(self.delete(self.id, if_updated_at=self.row["updated_at"])[0], 204)
+        self.assertEqual(self.delete(self.id)[0], 404)
         self.assertEqual(self.quota()["count"], 0)
+
+    def test_older_route_path_parameter_is_still_accepted(self):
+        status, body = self.call("PATCH /subscriptions/{route}", {"target_price": 7}, path={"route": self.id})
+        self.assertEqual((status, body["target_price"]), (200, 7))
 
 
 class ExpiryTests(LocalDynamoTestCase):
@@ -662,11 +756,14 @@ class ExpiryTests(LocalDynamoTestCase):
         listing = self.call("GET /subscriptions")[1]
         self.assertEqual(listing["subscriptions"][0]["status"], "expired")
         # Editing the target keeps the expired month; it stays expired.
-        body = self.patch("TPE-LON", {"target_price": 1, "departure_month": "2026-12"})[1]
-        self.assertEqual(body["status"], "expired")
-        self.assertEqual(self.patch("TPE-LON", {"departure_month": "2027-01"})[1]["error"], "invalid_departure_month")
-        body = self.patch("TPE-LON", {"departure_month": "2027-04"})[1]
-        self.assertEqual((body["status"], body["effective_month"]), ("active", "2027-04"))
+        body = self.patch(fid("LON", "2026-12"), {"target_price": 1, "departure_month": "2026-12"})[1]
+        self.assertEqual((body["status"], body["id"]), ("expired", "TPE-LON_2026-12"))
+        self.assertEqual(self.patch(fid("LON", "2026-12"), {"departure_month": "2027-01"})[1]["error"],
+                         "invalid_departure_month")
+        body = self.patch(fid("LON", "2026-12"), {"departure_month": "2027-04"})[1]
+        self.assertEqual((body["id"], body["status"], body["effective_month"]), ("TPE-LON_2027-04", "active", "2027-04"))
+        self.assertEqual(sorted(self.raw()), ["TPE-LON#2027-04"])
+        self.assertEqual(self.quota()["count"], 1)
 
 
 class M1CompatibilityTests(LocalDynamoTestCase):
@@ -699,9 +796,28 @@ class M1CompatibilityTests(LocalDynamoTestCase):
         self.assertNotIn("departure_month", self.raw()["TPE-TYO"])
         self.assertEqual(self.patch("TPE-TYO", {"departure_month": None})[0], 200)  # no change
         body = self.patch("TPE-TYO", {"departure_month": "2027-02"})[1]
-        self.assertEqual((body["month_mode"], body["plan_name"], body["created_at"]),
-                         ("fixed", "tokyo", "2026-10-30T00:00:00+00:00"))
-        self.assertEqual(self.patch("TPE-TYO", {"departure_month": None})[1]["error"], "invalid_departure_month")
+        # Choosing a month moves the row to its fixed-month key; the M1 plan marker stays with the
+        # rolling key (it identifies the two M1 plan rows), the subscription keeps its created_at.
+        self.assertEqual((body["id"], body["month_mode"], body["plan_name"], body["created_at"]),
+                         ("TPE-TYO_2027-02", "fixed", None, "2026-10-30T00:00:00+00:00"))
+        self.assertEqual(sorted(self.raw()), ["TPE-SEL", "TPE-TYO#2027-02"])
+        self.assertIsNone(self.quota())  # a key change never touches the quota
+        self.assertEqual(self.patch("TPE-TYO", {"target_price": 1})[0], 404)
+        self.assertEqual(self.patch("TPE-TYO_2027-02", {"departure_month": None})[1]["error"], "invalid_departure_month")
+
+    def test_rolling_and_fixed_rows_of_one_route_coexist(self):
+        """R-MM-1: the legacy rolling TPE-TYO and a fixed TPE-TYO month are separate records,
+        including the fixed month equal to the rolling row's effective month (2026-12 here)."""
+        self.assertEqual(self.create("TYO", month="2026-12", target=8000)[0], 201)
+        self.assertEqual(self.create("TYO", month="2027-03")[0], 201)
+        subs = {s["id"]: s for s in self.call("GET /subscriptions")[1]["subscriptions"]}
+        self.assertEqual(sorted(subs), ["TPE-SEL", "TPE-TYO", "TPE-TYO_2026-12", "TPE-TYO_2027-03"])
+        self.assertEqual((subs["TPE-TYO"]["effective_month"], subs["TPE-TYO_2026-12"]["effective_month"]),
+                         ("2026-12", "2026-12"))
+        self.assertEqual(self.quota()["count"], 4)
+        # Moving the rolling row onto an existing fixed month is a duplicate, not a merge.
+        status, body = self.patch("TPE-TYO", {"departure_month": "2026-12"})
+        self.assertEqual((status, body["error"]), (409, "duplicate_subscription"))
 
     def test_second_precision_m1_timestamp_still_advances(self):
         body = self.patch("TPE-TYO", {"target_price": 1})[1]
@@ -721,16 +837,26 @@ class LegacySubscribeTests(LocalDynamoTestCase):
         self.assertNotIn("departure_month", row)
         self.assertEqual(self.quota()["count"], 1)
 
-    def test_existing_route_updates_in_place(self):
-        self.create("TYO", month="2027-03")
+    def test_existing_rolling_row_updates_in_place(self):
+        self.legacy("tokyo", 9000)
         self.patch("TPE-TYO", {"alerts_paused": True})
         created = self.raw()["TPE-TYO"]["created_at"]
         version = self.quota()["version"]
         self.assertEqual(self.legacy("tokyo", 7777)[0], 200)
         row = self.raw()["TPE-TYO"]
-        self.assertEqual((row["target_price"], row["plan_name"], row["departure_month"], row["alerts_paused"],
-                          row["created_at"]), (7777, "tokyo", "2027-03", True, created))
+        self.assertEqual((row["target_price"], row["plan_name"], row["alerts_paused"], row["created_at"]),
+                         (7777, "tokyo", True, created))
+        self.assertNotIn("departure_month", row)
         self.assertEqual(self.quota()["version"], version)
+
+    def test_fixed_month_rows_are_never_touched_by_the_legacy_endpoint(self):
+        _, fixed = self.create("TYO", month="2027-03", target=5000)
+        self.assertEqual(self.legacy("tokyo", 7777)[0], 200)  # creates the rolling row beside it
+        rows = self.raw()
+        self.assertEqual(sorted(rows), ["TPE-TYO", "TPE-TYO#2027-03"])
+        self.assertEqual((rows["TPE-TYO#2027-03"]["target_price"], rows["TPE-TYO#2027-03"]["updated_at"]),
+                         (5000, fixed["updated_at"]))
+        self.assertEqual(self.quota()["count"], 2)
 
     def test_cannot_bypass_the_limit(self):
         for d in DESTS[:10]:
@@ -772,12 +898,13 @@ class HandlerSecurityTests(LocalDynamoTestCase):
 
     ROUTES = [("GET /subscriptions", None, None), ("POST /subscriptions", {"origin": "TPE", "destination": "LON",
               "departure_month": "2027-01", "target_price": 1}, None),
-              ("PATCH /subscriptions/{route}", {"target_price": 1}, {"route": "TPE-LON"}),
-              ("DELETE /subscriptions/{route}", None, {"route": "TPE-LON"}),
+              ("PATCH /subscriptions/{id}", {"target_price": 1}, {"id": "TPE-LON_2027-01"}),
+              ("DELETE /subscriptions/{id}", None, {"id": "TPE-LON_2027-01"}),
+              ("PATCH /subscriptions/{route}", {"target_price": 1}, {"route": "TPE-LON_2027-01"}),
               ("POST /subscribe", {"plan_name": "tokyo", "target_price": 1}, None)]
 
     def test_every_operation_requires_a_valid_session(self):
-        self.seed(USER, "TPE-LON", departure_month="2027-01")
+        self.seed(USER, fkey("LON"), departure_month="2027-01")
         before = self.raw()
         for key, body, path in self.ROUTES:
             for token in (None, "forged", ""):
@@ -803,16 +930,18 @@ class HandlerSecurityTests(LocalDynamoTestCase):
         self.assertEqual(r["statusCode"], 401)
 
     def test_no_access_to_another_users_rows(self):
-        self.seed(OTHER, "TPE-LON", departure_month="2027-01")
+        self.seed(OTHER, fkey("LON"), departure_month="2027-01")
         theirs = self.raw(OTHER)
         self.assertEqual(self.call("GET /subscriptions")[1]["subscriptions"], [])
-        self.assertEqual(self.patch("TPE-LON", {"target_price": 1, "email": OTHER})[0], 404)
-        self.assertEqual(self.call("DELETE /subscriptions/{route}", path={"route": "TPE-LON"},
+        # Knowing another user's subscription ID gives no access: the ID is only a sort key
+        # inside the caller's own partition (the session's email).
+        self.assertEqual(self.patch(fid("LON"), {"target_price": 1, "email": OTHER})[0], 404)
+        self.assertEqual(self.call("DELETE /subscriptions/{id}", path={"id": fid("LON")},
                                    query={"email": OTHER})[0], 404)
         status, body = self.create("LON")  # creates the caller's own row, not theirs
         self.assertEqual(status, 201)
         self.assertEqual(self.raw(OTHER), theirs)
-        self.assertEqual(sorted(self.raw(USER)), ["TPE-LON"])
+        self.assertEqual(sorted(self.raw(USER)), [fkey("LON")])
 
 
 class TransactionShapeTests(LocalDynamoTestCase):
@@ -862,19 +991,26 @@ class TransactionShapeTests(LocalDynamoTestCase):
         self.assertEqual(self.quota(), {**self.quota(), "count": 3, "version": 4})  # TYO deleted; SEL, LON, PAR
         self.assert_invariants()
 
-    def test_route_change_is_one_transaction_without_the_quota(self):
+    def test_route_and_month_changes_are_one_transaction_without_the_quota(self):
         self.create("LON")
-        self.calls.clear()
-        self.patch("TPE-LON", {"origin": "KHH", "destination": "LON"})
-        self.assertEqual(len(self.calls), 1)
-        self.assertEqual([k[:2] for k in self.kinds(self.calls[0])],
-                         [("Delete", self.subs_table), ("Put", self.subs_table)])
-        self.assert_well_formed(self.calls[0])
+        for body in ({"origin": "KHH", "destination": "LON"}, {"departure_month": "2027-05"}):
+            self.calls.clear()
+            current = next(iter(self.raw()))
+            self.patch(subkeys.public_id(current), body)
+            self.assertEqual(len(self.calls), 1, body)
+            self.assertEqual([k for k in self.kinds(self.calls[0])],
+                             [("Delete", self.subs_table, "attribute_exists(email) AND updated_at = :u"),
+                              ("Put", self.subs_table, "attribute_not_exists(email)")], body)
+            self.assert_well_formed(self.calls[0])
+        self.assertEqual(sorted(self.raw()), ["KHH-LON#2027-05"])
+        self.assertEqual((self.quota()["count"], self.quota()["version"]), (1, 1))
 
     def test_edits_pause_and_legacy_updates_are_not_transactions(self):
         self.create("TYO")
+        self.call("POST /subscribe", {"plan_name": "tokyo", "target_price": 6})
         self.calls.clear()
-        self.patch("TPE-TYO", {"target_price": 5, "alerts_paused": True, "departure_month": "2027-05"})
+        self.patch(fid("TYO"), {"target_price": 5, "alerts_paused": True, "departure_month": "2027-01"})
+        self.patch("TPE-TYO", {"target_price": 7, "alerts_paused": True})
         self.call("POST /subscribe", {"plan_name": "tokyo", "target_price": 6})
         self.assertEqual(self.calls, [])  # single conditional UpdateItems; the count can't change
 
@@ -936,12 +1072,25 @@ class RetryHandlingTests(LocalDynamoTestCase):
     def test_conditional_check_failed_on_updates(self):
         self.create("LON")
         with mock.patch.object(self.store, "update", side_effect=store_mod.ConditionFailed()):
-            self.assertEqual(self.patch("TPE-LON", {"target_price": 2})[1]["error"], "conflict")
+            self.assertEqual(self.patch(fid("LON"), {"target_price": 2})[1]["error"], "conflict")
+
+    def test_month_change_transaction_conflict_is_409_and_writes_nothing(self):
+        _, row = self.create("LON")
+        for reasons in (["TransactionConflict", "None"], ["ConditionalCheckFailed", "None"]):
+            with mock.patch.object(self.store, "change_route", side_effect=store_mod.TxCancelled(reasons)):
+                status, body = self.patch(fid("LON"), {"departure_month": "2027-04"})
+            self.assertEqual((status, body["error"]), (409, "conflict"), reasons)
+        with mock.patch.object(self.store, "change_route",
+                               side_effect=store_mod.TxCancelled(["None", "ConditionalCheckFailed"])):
+            self.assertEqual(self.patch(fid("LON"), {"departure_month": "2027-04"})[1]["error"],
+                             "duplicate_subscription")
+        self.assertEqual(self.raw(), {fkey("LON"): self.raw()[fkey("LON")]})
+        self.assertEqual(self.raw()[fkey("LON")]["updated_at"], row["updated_at"])
 
     def test_cancellation_reasons_are_parsed_from_dynamodb(self):
         self.create("LON")
         with self.assertRaises(store_mod.TxCancelled) as e:
-            self.store.create(USER, {"route": "TPE-LON", "target_price": 1}, self.quota(), 2, "t")
+            self.store.create(USER, {"route": fkey("LON"), "target_price": 1}, self.quota(), 2, "t")
         self.assertEqual(e.exception.reasons[0], "ConditionalCheckFailed")
 
     def test_other_dynamodb_errors_are_500_and_write_nothing(self):
@@ -984,7 +1133,7 @@ class TransactionConflictRegressionTests(LocalDynamoTestCase):
         self.create("LON")
         patcher, _ = self.fail_first_updates(1)
         with patcher, self.assertRaises(store_mod.WriteConflict) as e:
-            self.store.update(USER, "TPE-LON", {"target_price": 1}, [])
+            self.store.update(USER, fkey("LON"), {"target_price": 1}, [])
         self.assertEqual(e.exception.code, "TransactionConflictException")
         self.assertTrue(e.exception.retryable)
 
@@ -1013,21 +1162,22 @@ class TransactionConflictRegressionTests(LocalDynamoTestCase):
     def test_patch_returns_409_without_retrying(self):
         _, row = self.create("LON", target=28000)
         patcher, calls = self.fail_first_updates(99)
-        for body in ({"target_price": 1}, {"departure_month": "2027-05"}, {"alerts_paused": True},
+        # (A month change is a key change, i.e. a transaction: see RetryHandlingTests.)
+        for body in ({"target_price": 1}, {"target_price": 3, "departure_month": "2027-01"}, {"alerts_paused": True},
                      {"alerts_paused": False, "target_price": 2}):
             with patcher:
-                status, out = self.patch("TPE-LON", body)
+                status, out = self.patch(fid("LON"), body)
             self.assertEqual((status, out["error"]), (409, "conflict"), body)
         self.assertEqual(calls["n"], 4)  # exactly one attempt per request: no blind retry
         self.assertEqual(self.sleeps, [])
-        self.assertEqual(self.raw()["TPE-LON"]["updated_at"], row["updated_at"])
+        self.assertEqual(self.raw()[fkey("LON")]["updated_at"], row["updated_at"])
 
     def test_conditional_check_failed_handling_is_unchanged(self):
         self.create("LON")
         patcher, _ = self.fail_first_updates(1, code="ConditionalCheckFailedException")
         with patcher:
-            self.assertEqual(self.patch("TPE-LON", {"target_price": 1})[1]["error"], "conflict")
-        self.assertEqual(self.patch("TPE-PAR", {"target_price": 1})[0], 404)
+            self.assertEqual(self.patch(fid("LON"), {"target_price": 1})[1]["error"], "conflict")
+        self.assertEqual(self.patch(fid("PAR"), {"target_price": 1})[0], 404)
 
     def test_transaction_in_progress_is_never_retried(self):
         """Our own re-sent transaction may still commit: report 409, don't create a second one."""
@@ -1062,7 +1212,7 @@ class TransactionConflictRegressionTests(LocalDynamoTestCase):
             for code in ("ValidationException", "AccessDeniedException"):
                 patcher, _ = self.fail_first_updates(1, code=code)
                 with patcher, mock.patch("builtins.print") as log:
-                    status, body = self.patch("TPE-LON", {"target_price": 1})
+                    status, body = self.patch(fid("LON"), {"target_price": 1})
                 self.assertEqual((status, body["error"]), (500, "internal_error"), code)
                 line = json.loads(log.call_args[0][0])
                 self.assertEqual((line["exception"], line["aws_error"]), ("ClientError", code))
@@ -1173,13 +1323,38 @@ class ConcurrencyTests(LocalDynamoTestCase):
         self.assertEqual(sum(s == 201 for s, _ in results), 1, self.codes(results))
         self.assertTrue(all(b["error"] in ("duplicate_subscription", "conflict")
                             for s, b in results if s != 201), self.codes(results))
-        self.assertEqual(sorted(self.raw()), ["TPE-LON"])
+        self.assertEqual(sorted(self.raw()), [fkey("LON")])
+        self.assert_invariants()
+
+    def test_60_creates_of_one_route_across_twelve_months(self):
+        """R-MM-1: each month is its own record; the limit still caps the total at 10."""
+        months_ = ["2026-12"] + [f"2027-{m:02d}" for m in range(1, 12)]
+        results = self.run_parallel([self.create_call("TYO", month=months_[i % 12]) for i in range(60)])
+        rows = self.raw()
+        created = [b["id"] for s, b in results if s == 201]
+        self.assertTrue(1 <= len(created) <= 10, self.codes(results))
+        self.assertEqual(len(created), len(set(created)), "a month was created twice")
+        self.assertEqual(sorted(rows), sorted(subkeys.key_from_id(i) for i in created))
+        self.assertTrue(all(s == 201 or b["error"] in ("duplicate_subscription", "limit_reached", "conflict")
+                            for s, b in results), self.codes(results))
+        self.assert_invariants()
+        for m in months_:  # sequential follow-up: exactly 10, the 11th month refused
+            self.create_call("TYO", month=m)()
+        self.assertEqual(len(self.raw()), 10)
+        self.assert_invariants()
+
+    def test_50_duplicate_creates_of_one_month_beside_other_months(self):
+        for m in ("2027-01", "2027-02"):
+            self.create("TYO", month=m)
+        results = self.run_parallel([self.create_call("TYO", month="2027-03") for _ in range(50)])
+        self.assertEqual(sum(s == 201 for s, _ in results), 1, self.codes(results))
+        self.assertEqual(sorted(self.raw()), [fkey("TYO", m) for m in ("2027-01", "2027-02", "2027-03")])
         self.assert_invariants()
 
     def test_creates_and_deletes_at_the_limit(self):
         for d in DESTS[:10]:
             self.create(d)
-        deletes = [lambda d=d: self.svc_call("delete", USER, f"TPE-{d}") for d in DESTS[:5]]
+        deletes = [lambda d=d: self.svc_call("delete", USER, fid(d)) for d in DESTS[:5]]
         creates = [self.create_call(d) for d in DESTS[10:55]]
         results = self.run_parallel(deletes + creates)
         deleted = sum(s == 204 for s, _ in results[:5])
@@ -1211,9 +1386,9 @@ class ConcurrencyTests(LocalDynamoTestCase):
     def test_pauses_resumes_and_route_edits_alongside_creates(self):
         for d in DESTS[:8]:
             self.create(d)
-        pauses = [lambda i=i: self.svc_call("patch", USER, f"TPE-{DESTS[i % 4]}", {"alerts_paused": i % 2 == 0})
+        pauses = [lambda i=i: self.svc_call("patch", USER, fid(DESTS[i % 4]), {"alerts_paused": i % 2 == 0})
                   for i in range(20)]
-        edits = [lambda: self.svc_call("patch", USER, "TPE-SPK", {"origin": "KHH", "destination": "SPK"})
+        edits = [lambda: self.svc_call("patch", USER, fid("SPK"), {"origin": "KHH", "destination": "SPK"})
                  for _ in range(5)]
         creates = [self.create_call(d) for d in DESTS[10:40]]
         results = self.run_parallel(pauses + edits + creates)
@@ -1221,8 +1396,8 @@ class ConcurrencyTests(LocalDynamoTestCase):
         self.assertTrue(all(s in (200, 404, 409) for s, _ in results[20:25]), self.codes(results[20:25]))
         self.assertEqual(sum(s == 200 for s, _ in results[20:25]), 1, self.codes(results[20:25]))
         self.assertLessEqual(sum(s == 201 for s, _ in results[25:]), 2, self.codes(results[25:]))
-        self.assertIn("KHH-SPK", self.raw())
-        self.assertNotIn("TPE-SPK", self.raw())
+        self.assertIn(fkey("SPK", origin="KHH"), self.raw())
+        self.assertNotIn(fkey("SPK"), self.raw())
         self.assert_invariants()
         self.fill_up()
 

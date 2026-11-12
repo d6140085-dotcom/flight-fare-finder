@@ -175,7 +175,15 @@ export function RouteForm({
           className="space-y-1 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm"
         >
           {errors.map((code) => (
-            <li key={code}>{errorMessage(code, { origin, destination, now, policy: POLICY })}</li>
+            <li key={code}>
+              {errorMessage(code, {
+                origin,
+                destination,
+                departure_month: month === ROLLING ? null : month,
+                now,
+                policy: POLICY,
+              })}
+            </li>
           ))}
         </ul>
       )}

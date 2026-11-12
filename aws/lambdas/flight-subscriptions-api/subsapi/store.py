@@ -2,7 +2,9 @@
 cancellation reasons are explicit). All reads are strongly consistent.
 
 Tables (names from the environment):
-  subscriptions       PK email, SK route  — existing M1 table, unchanged schema
+  subscriptions       PK email, SK route  — existing M1 table, unchanged schema. The SK value is
+                      "ORIG-DEST" (legacy rolling) or "ORIG-DEST#YYYY-MM" (fixed month, R-MM-1);
+                      see subkeys.py
   subscription_quota  PK email; count, version — new in M1.4 (contract §5.1)
 """
 import json
@@ -177,7 +179,8 @@ class Store:
         self._transact([{"Delete": op}, self._quota_update(email, quota, new_count, now)])
 
     def change_route(self, email, old_route, expected_updated_at, new_row):
-        """Delete old + Put new in one transaction; the record count is unchanged (§6)."""
+        """Delete old + Put new in one transaction; the record count is unchanged (§6). Used for
+        every sort-key change: route changes and, since R-MM-1, month changes."""
         self._transact([
             {"Delete": {"TableName": self.subs, "Key": to_item({"email": email, "route": old_route}),
                         "ConditionExpression": "attribute_exists(email) AND updated_at = :u",

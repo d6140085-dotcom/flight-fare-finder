@@ -117,8 +117,11 @@ class TableReader:
         return self._scan(ProjectionExpression=", ".join(names), ExpressionAttributeNames=names)
 
     def rows_for_route(self, route):
-        return self._scan(FilterExpression="#r = :r", ExpressionAttributeNames={"#r": "route"},
-                          ExpressionAttributeValues={":r": route})
+        """Every row of a route pair: the legacy rolling key "ORIG-DEST" and the fixed-month keys
+        "ORIG-DEST#YYYY-MM" (R-MM-1). Codes are exactly 3 letters, so the prefix can't match
+        another pair."""
+        return self._scan(FilterExpression="#r = :r OR begins_with(#r, :p)", ExpressionAttributeNames={"#r": "route"},
+                          ExpressionAttributeValues={":r": route, ":p": f"{route}#"})
 
 
 class ListReader:
@@ -130,7 +133,7 @@ class ListReader:
         return ({k: v for k, v in r.items() if k in TableReader.WRAPPER_FIELDS} for r in self.rows)
 
     def rows_for_route(self, route):
-        return (r for r in self.rows if r.get("route") == route)
+        return (r for r in self.rows if r.get("route") == route or str(r.get("route", "")).startswith(f"{route}#"))
 
 
 def get_token(name, client_factory):

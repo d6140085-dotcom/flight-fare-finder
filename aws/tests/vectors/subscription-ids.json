@@ -1,0 +1,15 @@
+{
+ "_comment": "Subscription identity vectors (R-MM-1, docs/m1.4-r-mm-1-multi-month.md §2). Shared by aws/tests/test_m14_multi_month.py and src/lib/m14/subscription-id.test.ts.",
+ "valid": [
+  {"origin": "TPE", "destination": "TYO", "departure_month": null, "sort_key": "TPE-TYO", "id": "TPE-TYO"},
+  {"origin": "TPE", "destination": "SEL", "departure_month": null, "sort_key": "TPE-SEL", "id": "TPE-SEL"},
+  {"origin": "KHH", "destination": "TYO", "departure_month": "2027-01", "sort_key": "KHH-TYO#2027-01", "id": "KHH-TYO_2027-01"},
+  {"origin": "KHH", "destination": "TYO", "departure_month": "2027-02", "sort_key": "KHH-TYO#2027-02", "id": "KHH-TYO_2027-02"},
+  {"origin": "KHH", "destination": "TYO", "departure_month": "2027-03", "sort_key": "KHH-TYO#2027-03", "id": "KHH-TYO_2027-03"},
+  {"origin": "RMQ", "destination": "LON", "departure_month": "2026-12", "sort_key": "RMQ-LON#2026-12", "id": "RMQ-LON_2026-12"}
+ ],
+ "invalid_ids": ["KHH-TYO#2027-01", "KHH-TYO%232027-01", "khh-tyo", "KHH-TYO_2027-13", "KHH-TYO_2027-1",
+                 "KHH-TYO_", "KHH-TYO_2027-01_2027-02", "KHH-TYO-2027-01", "../KHH-TYO", "KHH-TYOO", "", " KHH-TYO"],
+ "invalid_keys": ["KHH-TYO_2027-01", "KHH-TYO#2027-00", "KHH-TYO#", "KHH-TYO#2027", "khh-tyo#2027-01",
+                  "KHH-TYO#2027-01#x", "KHH-TYOO#2027-01", ""]
+}

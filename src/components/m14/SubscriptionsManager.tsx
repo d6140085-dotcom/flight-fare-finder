@@ -40,7 +40,8 @@ export function SubscriptionsManager({
 }: SubscriptionsManagerProps) {
   const queryClient = useQueryClient();
   const queryKey = ["m14", "subscriptions", client.kind, cacheKey];
-  const [busyRoute, setBusyRoute] = useState<string | null>(null);
+  /** Public ID of the subscription with a request in flight (R-MM-1: never the route pair). */
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [writeError, setWriteError] = useState<string | null>(null);
 
   const list = useQuery<ListResponse, unknown>({
@@ -70,21 +71,20 @@ export function SubscriptionsManager({
       }),
   });
   const update = useMutation({
-    mutationFn: ({ route, patch }: { route: string; patch: PatchRequest }) =>
-      client.update(route, patch),
+    mutationFn: ({ id, patch }: { id: string; patch: PatchRequest }) => client.update(id, patch),
   });
   const remove = useMutation({
-    mutationFn: ({ route, ifUpdatedAt }: { route: string; ifUpdatedAt: string }) =>
-      client.remove(route, ifUpdatedAt),
+    mutationFn: ({ id, ifUpdatedAt }: { id: string; ifUpdatedAt: string }) =>
+      client.remove(id, ifUpdatedAt),
   });
 
   async function run<T>(
-    route: string | null,
+    id: string | null,
     action: () => Promise<T>,
     success: string,
     ctx: { origin?: string; destination?: string } = {},
   ): Promise<boolean> {
-    setBusyRoute(route);
+    setBusyId(id);
     setWriteError(null);
     try {
       await action();
@@ -95,7 +95,7 @@ export function SubscriptionsManager({
       reportFailure(err, ctx);
       return false;
     } finally {
-      setBusyRoute(null);
+      setBusyId(null);
     }
   }
 
@@ -202,7 +202,10 @@ export function SubscriptionsManager({
         >
           <p>{SHORT_DISCLAIMER}</p>
           <p>{AFFILIATE_DISCLOSURE}</p>
-          <p>每條航線目前只能追蹤一個出發月份；想改月份，請編輯既有的訂閱。</p>
+          <p>
+            同一航線可以分別追蹤不同的出發月份，每個月份各算 1
+            筆訂閱。舊版「每月滾動」的訂閱若與某個月份的訂閱查詢同一個月，同一天最多寄出一封通知。
+          </p>
           {demoMarker && (
             <p className="font-medium text-foreground">
               開發預覽：Aviasales
@@ -231,7 +234,7 @@ export function SubscriptionsManager({
               const label = routeLabel(sub.origin, sub.destination);
               return (
                 <SubscriptionItem
-                  key={sub.route}
+                  key={sub.id}
                   sub={sub}
                   subs={subs}
                   now={today}
@@ -240,7 +243,7 @@ export function SubscriptionsManager({
                   comparison={view.comparison}
                   itinerary={view.itinerary}
                   links={view.links ? <SearchLinks links={view.links} /> : null}
-                  busy={busyRoute === sub.route}
+                  busy={busyId === sub.id}
                   onEdit={(value) => {
                     const patch: PatchRequest = { if_updated_at: sub.updated_at };
                     if (value.origin !== sub.origin || value.destination !== sub.destination) {
@@ -253,18 +256,18 @@ export function SubscriptionsManager({
                     if (value.target !== sub.target_price) patch.target_price = value.target;
                     if (Object.keys(patch).length === 1) return true; // nothing changed
                     return run(
-                      sub.route,
-                      () => update.mutateAsync({ route: sub.route, patch }),
+                      sub.id,
+                      () => update.mutateAsync({ id: sub.id, patch }),
                       `已更新「${routeLabel(value.origin, value.destination)}」`,
                       value,
                     );
                   }}
                   onPause={() =>
                     void run(
-                      sub.route,
+                      sub.id,
                       () =>
                         update.mutateAsync({
-                          route: sub.route,
+                          id: sub.id,
                           patch: { alerts_paused: true, if_updated_at: sub.updated_at },
                         }),
                       `已暫停「${label}」`,
@@ -272,10 +275,10 @@ export function SubscriptionsManager({
                   }
                   onResume={() =>
                     void run(
-                      sub.route,
+                      sub.id,
                       () =>
                         update.mutateAsync({
-                          route: sub.route,
+                          id: sub.id,
                           patch: { alerts_paused: false, if_updated_at: sub.updated_at },
                         }),
                       `已恢復追蹤「${label}」`,
@@ -283,8 +286,8 @@ export function SubscriptionsManager({
                   }
                   onDelete={() =>
                     void run(
-                      sub.route,
-                      () => remove.mutateAsync({ route: sub.route, ifUpdatedAt: sub.updated_at }),
+                      sub.id,
+                      () => remove.mutateAsync({ id: sub.id, ifUpdatedAt: sub.updated_at }),
                       `已刪除「${label}」`,
                     )
                   }

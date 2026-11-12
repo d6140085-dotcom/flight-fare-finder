@@ -15,7 +15,9 @@ def message(code, cfg, now, details=None):
 
     if code == "duplicate_subscription":
         o, _, d = (details.get("route") or "-").partition("-")
-        return f"你已經訂閱過「{name(o)} → {name(d)}」這條航線（每條航線只能訂閱一個月份）。"
+        month = details.get("departure_month")
+        when = f" {label(month)}" if month else "（每月滾動）"
+        return f"你已經訂閱過「{name(o)} → {name(d)}」{when}出發的航線，同一航線同一月份只能訂閱一次。"
     if code == "invalid_departure_month":
         months = selectable_months(now, cfg.first_offset_months, cfg.window_months)
         return f"請選擇 {label(months[0])} 到 {label(months[-1])} 之間的出發月份。"
@@ -28,7 +30,7 @@ def message(code, cfg, now, details=None):
         "same_origin_destination": "出發地與目的地不能相同。",
         "invalid_target_price": f"目標價請輸入 {_fmt(cfg.min_target)} 到 {_fmt(cfg.max_target)} 之間的整數（新台幣）。",
         "invalid_alerts_paused": "暫停狀態格式不正確。",
-        "invalid_route": "航線代碼格式不正確。",
+        "invalid_route": "訂閱代碼格式不正確。",
         "route_change_incomplete": "變更航線時，請同時提供出發地與目的地。",
         "empty_patch": "沒有要變更的內容。",
         "unknown_field": "包含不支援的欄位。",

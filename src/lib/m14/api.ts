@@ -5,7 +5,8 @@
 import type { FareCheck } from "./fare-status";
 import { errorMessage, type ErrorCode, type RouteSubscription, type Status } from "./subscriptions";
 
-/** §3.1 Subscription as returned by the API (a superset of the prototype's RouteSubscription). */
+/** §3.1 Subscription as returned by the API (a superset of the prototype's RouteSubscription).
+ * `id` is the public subscription ID used in PATCH/DELETE paths (R-MM-1); `route` is the pair. */
 export interface SubscriptionDto extends RouteSubscription {
   origin_name: { zh: string; en: string } | null;
   destination_name: { zh: string; en: string } | null;
@@ -31,7 +32,7 @@ export interface CreateRequest {
   target_price: number;
 }
 
-/** §4.3 PATCH /subscriptions/{route}. */
+/** §4.3 PATCH /subscriptions/{id}. */
 export interface PatchRequest {
   target_price?: number;
   departure_month?: string | null;
@@ -72,8 +73,9 @@ export interface SubscriptionsClient {
   readonly kind: "mock" | "http";
   list(): Promise<ListResponse>;
   create(req: CreateRequest): Promise<SubscriptionDto>;
-  update(route: string, patch: PatchRequest): Promise<SubscriptionDto>;
-  remove(route: string, ifUpdatedAt?: string): Promise<void>;
+  /** `id`: the public subscription ID ("KHH-TYO" or "KHH-TYO_2027-01"), never the route pair. */
+  update(id: string, patch: PatchRequest): Promise<SubscriptionDto>;
+  remove(id: string, ifUpdatedAt?: string): Promise<void>;
 }
 
 const SHARED: ReadonlySet<string> = new Set<ErrorCode>([
@@ -92,10 +94,16 @@ const SHARED: ReadonlySet<string> = new Set<ErrorCode>([
 /** Traditional Chinese text for an API error. Never echoes server text or tokens. */
 export function apiErrorMessage(
   err: unknown,
-  ctx: { origin?: string; destination?: string; now?: Date } = {},
+  ctx: { origin?: string; destination?: string; departure_month?: string | null; now?: Date } = {},
 ): string {
   const code: ApiErrorCode = err instanceof ApiError ? err.code : "network_error";
-  if (SHARED.has(code)) return errorMessage(code as ErrorCode, ctx);
+  if (SHARED.has(code)) {
+    const month = err instanceof ApiError ? err.details["departure_month"] : undefined;
+    return errorMessage(code as ErrorCode, {
+      ...ctx,
+      ...(typeof month === "string" || month === null ? { departure_month: month } : {}),
+    });
+  }
   switch (code) {
     case "unauthorized":
       return "登入已過期，請重新登入。";

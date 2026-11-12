@@ -2,6 +2,7 @@
 contract's order, or returns clean values."""
 import re
 
+from . import subkeys
 from .errors import ApiError
 from .months import MONTH_RE, selectable_months
 
@@ -76,6 +77,15 @@ def route_param(value):
     if not isinstance(value, str) or not ROUTE_RE.match(value):
         raise ApiError(400, "invalid_route")
     return value
+
+
+def id_param(value):
+    """Public subscription ID from the URL path -> sort key (R-MM-1). "KHH-TYO" (legacy rolling)
+    or "KHH-TYO_2027-01" (fixed month); anything else is 400 invalid_route."""
+    key = subkeys.key_from_id(value)
+    if key is None:
+        raise ApiError(400, "invalid_route")
+    return key
 
 
 def create_body(cfg, body, now):
