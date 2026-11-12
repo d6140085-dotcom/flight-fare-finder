@@ -46,7 +46,9 @@ def search_links(m, now, deps):
     o, d = m["route"].split("-")
     f = m["cheapest"]
     try:
-        return searchlinks.build(o, d, f.get("depart_date"), f.get("return_date"), months.today(now),
+        # Links are a function of the message: the scheduler's as_of fixes "today", so a retry on
+        # another day renders the same links (same payload under the same Idempotency-Key).
+        return searchlinks.build(o, d, f.get("depart_date"), f.get("return_date"), months.today(as_of_of(m, now)),
                                  catalog=deps.catalog, config=deps.links_config, marker=deps.marker)
     except Exception as e:              # noqa: BLE001 - never send the reference fare without the link
         raise mailer.AffiliateLinkUnavailable(f"link_builder_error:{type(e).__name__}") from None
@@ -164,7 +166,11 @@ def recheck(deps, m, email, route, month, price, as_of):
 
 def presented_target(m, eligible):
     """Target shown in the email: the lowest target among the still-eligible subscriptions (the
-    fare is at or below all of them). Falls back to the message's own value."""
+    fare is at or below all of them). Messages without `subscription_keys` (older fare checks)
+    always show the message's own value, exactly as before R-MM-1. The caller pins the result to
+    the claim, so retries of one fare event never change the payload."""
+    if m.get("subscription_keys") is None:
+        return m.get("target_price")
     targets = []
     for row in eligible:
         try:
@@ -255,6 +261,13 @@ def process(m, delivery_id, now, deps, enqueued_at=None):
             deps.log(f"{t}: recorded unconfirmed earlier attempt ({reason})")
             return "recorded:unconfirmed"
         target = presented_target(m, eligible)
+        if m.get("subscription_keys") is not None and deps.settings.recheck_subscription:
+            # first attempt pins its choice; a redelivery (e.g. after an unknown Resend outcome)
+            # reuses it even if the subscriptions changed meanwhile
+            try:
+                target = deps.history.pin_target(pk, eid, target)
+            except ClaimConflict:
+                raise Retry(f"{t}: claim lost before sending") from None
         if target != m.get("target_price"):
             # e.g. the strictest overlapping subscription was paused since the fare check: show
             # the target of one that still wants the alert (pure re-render, same links)

@@ -9,7 +9,7 @@ The notification part runs the v2 service on moto's local DynamoDB server with a
 import json
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
@@ -303,3 +303,213 @@ class OverlapNotificationTests(dedup.Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# =============================================================================================
+# End-to-end overlap flow: fare-check runner -> SQS messages -> v2 notification with re-check
+# =============================================================================================
+FARE_BODY = lambda price: {"success": True, "currency": "twd", "data": [{  # noqa: E731
+    "price": price, "airline": "BR", "origin": "TPE", "destination": "TYO",
+    "departure_at": "2026-12-10T08:00:00+08:00", "return_at": "2026-12-15T19:00:00+09:00"}]}
+AS_OF = "2026-11-20T04:00:00Z"            # 12:00 Taipei: rolling rows resolve to 2026-12
+ROLLING, FIXED = "TPE-TYO", "TPE-TYO#2026-12"
+
+
+@unittest.skipUnless(dedup.AVAILABLE, "boto3/moto not available")
+class OverlapFlowTests(dedup.Base):
+    """A rolling and a fixed-month subscription of one user resolving to the same month (policy
+    §4), driven through the real fare-check runner and the real v2 notification service."""
+
+    def put(self, key, target, **kw):
+        parts = fc_subkeys.parse_key(key)
+        item = {"email": A, "route": key, "origin": parts[0], "destination": parts[1],
+                "target_price": Decimal(target), **kw}
+        if parts[2]:
+            item["departure_month"] = parts[2]
+        self.subs.put_item(Item=item)
+
+    def fare_check(self, price, as_of=AS_OF):
+        """One parser run for TPE-TYO 2026-12; returns the SQS message bodies it would send."""
+        rows = self.subs.scan(ConsistentRead=True)["Items"]
+        sent, sqs = [], mock.Mock()
+        sqs.send_message.side_effect = lambda **kw: sent.append(json.loads(kw["MessageBody"]))
+        st = fc_config.Settings(mode="live", fare_api="v3", fetch_usd=False, queue_url="https://sqs.example/q",
+                                message_version=2)
+        now = datetime.strptime(as_of, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        runner.run_parser({"origin": "TPE", "destination": "TYO", "month": "2026-12", "as_of": as_of},
+                          settings=st, catalog=CATALOG, token="t" * 32, reader=effects.ListReader(rows), now=now,
+                          transport=lambda u, h, t: FARE_BODY(price), client_factory=lambda name: sqs,
+                          log=lambda m: None)
+        return sent
+
+    def deliver(self, msgs, at=NOW, delivery=None):
+        d = self.deps(recheck=True)
+        return [self.run_msg(m, at=at, d=d, delivery=delivery) for m in msgs]
+
+    def shown_target(self, i=-1):
+        text = self.resend.requests[i]["body"]["text"]
+        return [line for line in text.splitlines() if line.startswith("你的目標價")][0]
+
+    # ---- the cases ---------------------------------------------------------------------------
+    def test_different_targets_only_one_met(self):
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 7000)
+        msgs = self.fare_check(8000)
+        self.assertEqual([m["subscription_keys"] for m in msgs], [[ROLLING]])
+        self.assertEqual(self.deliver(msgs), ["sent"])
+        self.assertEqual(self.shown_target(), "你的目標價：NT$9,000")
+        self.put(FIXED, 9500, alerts_paused=False)          # now the other way round
+        self.put(ROLLING, 7000)
+        msgs = self.fare_check(8000)
+        self.assertEqual([m["subscription_keys"] for m in msgs], [[FIXED]])
+
+    def test_both_targets_met_one_email(self):
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        msgs = self.fare_check(8000)
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(self.deliver(msgs), ["sent"])
+        self.assertEqual((len(self.resend.deliveries), self.shown_target()), (1, "你的目標價：NT$8,500"))
+
+    def test_one_paused_before_sending(self):
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        msgs = self.fare_check(8000)
+        self.put(FIXED, 8500, alerts_paused=True)
+        self.assertEqual(self.deliver(msgs), ["sent"])
+        self.assertEqual(self.shown_target(), "你的目標價：NT$9,000")
+
+    def test_one_deleted_before_sending(self):
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        msgs = self.fare_check(8000)
+        self.subs.delete_item(Key={"email": A, "route": FIXED})
+        self.assertEqual(self.deliver(msgs), ["sent"])
+        self.assertEqual(self.shown_target(), "你的目標價：NT$9,000")
+
+    def test_both_deleted_or_paused_before_sending_nothing_recorded(self):
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        msgs = self.fare_check(8000)
+        self.subs.delete_item(Key={"email": A, "route": FIXED})
+        self.put(ROLLING, 9000, alerts_paused=True)
+        self.assertEqual(self.deliver(msgs), ["skipped:paused+subscription_gone"])
+        self.assertEqual(self.resend.requests, [])
+        st = self.state()
+        self.assertTrue(st is None or (not st.get("last_sent_at") and not st.get("claim_event")), st)
+
+    def test_one_target_changed_before_sending(self):
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        msgs = self.fare_check(8000)
+        self.put(FIXED, 7000)                                   # lowered below the fare: no longer wanted
+        self.assertEqual(self.deliver(msgs), ["sent"])
+        self.assertEqual(self.shown_target(), "你的目標價：NT$9,000")
+
+    def test_target_raised_before_sending_shows_a_target_still_met(self):
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        msgs = self.fare_check(8000)
+        self.put(FIXED, 8800)
+        self.assertEqual(self.deliver(msgs), ["sent"])
+        self.assertEqual(self.shown_target(), "你的目標價：NT$8,800")
+
+    def test_repeated_fare_check_events(self):
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        first = self.fare_check(8000)
+        self.assertEqual(self.deliver(first), ["sent"])
+        rerun = self.fare_check(8000)                           # parser re-run of the same schedule
+        self.assertEqual(rerun, first)                          # identical message
+        self.assertEqual(self.deliver(rerun, at=NOW + timedelta(minutes=1)), ["skipped:duplicate_event"])
+        nxt = self.fare_check(7900, as_of="2026-11-20T10:00:00Z")   # next schedule, small drop
+        self.assertEqual(self.deliver(nxt, at=datetime(2026, 11, 20, 10, 5, tzinfo=timezone.utc)), ["skipped:deduped"])
+        big = self.fare_check(6000, as_of="2026-11-20T16:00:00Z")   # >= NT$2,000 drop: M1 re-alert
+        self.assertEqual(self.deliver(big, at=datetime(2026, 11, 20, 16, 5, tzinfo=timezone.utc)), ["sent"])
+        self.assertEqual(len(self.resend.deliveries), 2)
+
+    def test_retry_after_uncertain_outcome_sends_the_same_payload(self):
+        """First attempt: the stricter subscription is paused, so the email shows NT$9,000; the
+        Resend response is lost (outcome unknown, claim kept). Before the redelivery the user
+        resumes it. The retry must reuse the first attempt's payload (pinned target) under the
+        same Idempotency-Key: exactly one email, never a refused or second one."""
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        (m,) = self.fare_check(8000)
+        self.put(FIXED, 8500, alerts_paused=True)
+        self.resend.statuses = ["lost"]
+        d = self.deps(recheck=True)
+        with self.assertRaises(dedup.service.Retry):
+            self.run_msg(m, delivery="sqs-1", d=d)
+        self.assertEqual(self.state()["claim_target"], 9000)
+        self.put(FIXED, 8500)                                   # resumed meanwhile
+        self.assertEqual(self.run_msg(m, at=NOW + timedelta(seconds=90), delivery="sqs-1", d=d), "sent")
+        first, last = self.resend.requests[0], self.resend.requests[-1]
+        self.assertEqual((first["key"], first["body"]), (last["key"], last["body"]))
+        self.assertEqual(len(self.resend.deliveries), 1)
+        self.assertNotIn("claim_target", self.state())        # cleared on commit
+
+    def test_without_the_pin_the_retry_would_be_refused(self):
+        """Regression proof for the pin: re-computing the target on retry would change the body,
+        Resend refuses a reused key with another payload, and the alert could be lost."""
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        (m,) = self.fare_check(8000)
+        self.put(FIXED, 8500, alerts_paused=True)
+        self.resend.statuses = ["timeout"]                      # never reached Resend
+        d = self.deps(recheck=True)
+        with mock.patch.object(dedup.history.History, "pin_target", lambda self_, pk, eid, t: t):
+            with self.assertRaises(dedup.service.Retry):
+                self.run_msg(m, delivery="sqs-1", d=d)
+            self.put(FIXED, 8500)
+            self.run_msg(m, at=NOW + timedelta(seconds=90), delivery="sqs-1", d=d)
+        self.assertNotEqual(self.resend.requests[0]["body"]["text"], self.resend.requests[-1]["body"]["text"])
+
+    def test_idempotency_key_and_payload_are_functions_of_the_fare_event(self):
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        (m,) = self.fare_check(8000)
+        with mock.patch.object(dedup.mailer, "send", return_value=(200, dedup.mailer.SENT, None)) as send:
+            self.run_msg(m, delivery="a", d=self.deps(recheck=True))
+        key = send.call_args.args[5]
+        pk = dedup.keys.stream_pk(dedup.keys.subscriber_id(A, dedup.PEPPER), "TPE-TYO", "2026-12")
+        self.assertEqual(key, dedup.keys.idempotency_key(dedup.keys.event_id(pk, m, "other-delivery")))
+        # Links use the scheduler's as_of, so a retry on a later day renders the same links.
+        later = dedup.service.render(m, datetime(2026, 11, 21, 3, 0, tzinfo=timezone.utc), self.deps(), "t")
+        now_ = dedup.service.render(m, NOW, self.deps(), "t")
+        self.assertEqual(later, now_)
+
+    def test_at_most_one_email_for_every_state_combination(self):
+        """Exhaustive: each subscription at check time {met, unmet, paused} x before sending
+        {unchanged, paused, deleted, target lowered, target raised}. The user gets one email iff
+        some subscription matched at check time and still wants it at send time; never two."""
+        import itertools
+        at_check = ("met", "unmet", "paused")
+        before_send = ("same", "pause", "delete", "lower", "raise")
+        n = 0
+        for (r0, f0), (r1, f1) in itertools.product(itertools.product(at_check, repeat=2),
+                                                    itertools.product(before_send, repeat=2)):
+            self.tearDown()
+            self.setUp()
+            for key, s0 in ((ROLLING, r0), (FIXED, f0)):
+                self.put(key, 9000 if s0 != "unmet" else 7000, **({"alerts_paused": True} if s0 == "paused" else {}))
+            msgs = self.fare_check(8000)
+            matched = [k for k, s0 in ((ROLLING, r0), (FIXED, f0)) if s0 == "met"]
+            self.assertEqual([m.get("subscription_keys") for m in msgs], [matched] if matched else [])
+            still = []
+            for key, s0, s1 in ((ROLLING, r0, r1), (FIXED, f0, f1)):
+                if s1 == "pause":
+                    self.put(key, 9000 if s0 != "unmet" else 7000, alerts_paused=True)
+                elif s1 == "delete":
+                    self.subs.delete_item(Key={"email": A, "route": key})
+                elif s1 == "lower":
+                    self.put(key, 7000, **({"alerts_paused": True} if s0 == "paused" else {}))
+                elif s1 == "raise":
+                    self.put(key, 9500, **({"alerts_paused": True} if s0 == "paused" else {}))
+                if key in matched and s1 in ("same", "raise"):
+                    still.append(key)
+            self.deliver(msgs)
+            self.assertLessEqual(len(self.resend.deliveries), 1)
+            self.assertEqual(len(self.resend.deliveries), 1 if still else 0, (r0, f0, r1, f1))
+            n += 1
+        self.assertEqual(n, 225)

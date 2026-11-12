@@ -11,6 +11,10 @@ Protocol per stream (state item = (pk, "STATE")):
                 Put log item  (pk, sent_at=<now>)                 IF attribute_not_exists(pk)
                 [Put M1 row   (email#route, sent_at=<now>)        IF attribute_not_exists(pk)]
      release  UpdateItem REMOVE claim IF claim_event = this event   (on any non-send outcome)
+  2b. pin     (R-MM-1 messages) UpdateItem SET claim_target = if_not_exists(claim_target, :t)
+              IF claim_event = this event: the target shown in the email is fixed by the first
+              attempt, so every retry of the same fare event sends the same payload under the
+              same Resend Idempotency-Key.
 """
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -96,9 +100,24 @@ class History:
             raise
         return (state or {}).get("version", 0) + 1
 
+    def pin_target(self, pk, eid, target):
+        """The presented target for this claim: the first attempt's value if one was pinned,
+        else `target`. Raises ClaimConflict if the claim is no longer ours."""
+        try:
+            r = self.table.update_item(
+                Key={"pk": pk, "sent_at": keys.STATE_SK},
+                UpdateExpression="SET claim_target = if_not_exists(claim_target, :t)",
+                ConditionExpression="claim_event = :e",
+                ExpressionAttributeValues={":t": int(target), ":e": eid}, ReturnValues="ALL_NEW")
+        except ClientError as e:
+            if _code(e) == "ConditionalCheckFailedException":
+                raise ClaimConflict(pk) from None
+            raise
+        return int(r["Attributes"]["claim_target"])
+
     def release(self, pk, eid):
         try:
-            self.table.update_item(Key={"pk": pk, "sent_at": keys.STATE_SK}, UpdateExpression="REMOVE claim_event, claim_expires",
+            self.table.update_item(Key={"pk": pk, "sent_at": keys.STATE_SK}, UpdateExpression="REMOVE claim_event, claim_expires, claim_target",
                                    ConditionExpression="claim_event = :e", ExpressionAttributeValues={":e": eid})
         except ClientError as e:
             if _code(e) != "ConditionalCheckFailedException":
@@ -113,7 +132,7 @@ class History:
             "TableName": self.name, "Key": {"pk": {"S": pk}, "sent_at": {"S": keys.STATE_SK}},
             "UpdateExpression": "SET last_sent_at = :t, last_price = :p, last_event_id = :e, version = version + :one, "
                                 "sends = if_not_exists(sends, :zero) + :one, route = :r, #m = :m, subscriber_id = :s "
-                                "REMOVE claim_event, claim_expires",
+                                "REMOVE claim_event, claim_expires, claim_target",
             "ConditionExpression": "claim_event = :e",
             "ExpressionAttributeNames": {"#m": "month"},
             "ExpressionAttributeValues": {":t": {"S": t}, ":p": {"N": str(price)}, ":e": {"S": eid}, ":one": {"N": "1"},

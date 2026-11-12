@@ -108,6 +108,7 @@ class InstrumentedStore(store_mod.Store):
         self._lock = threading.Lock()
         self.committed = 0
         self.quota_committed = 0  # committed transactions that changed a quota record (create/delete)
+        self.per_user = {}
         self.reasons = {}
 
     def _transact(self, items):
@@ -122,6 +123,15 @@ class InstrumentedStore(store_mod.Store):
             self.committed += 1
             if any(body["TableName"] == self.quota for item in items for body in item.values()):
                 self.quota_committed += 1
+            whos = {(body.get("Key") or body.get("Item") or {}).get("email", {}).get("S")
+                    for item in items for body in item.values()} - {None}
+            for who in whos:
+                self.per_user[who] = self.per_user.get(who, 0) + 1
+
+    def committed_for(self, email):
+        """Committed transactions that touched this user's rows or quota."""
+        with self._lock:
+            return self.per_user.get(email, 0)
 
 
 class Check:
@@ -146,6 +156,10 @@ class Check:
             self.that(parts is not None and parts[:2] == (r.get("origin"), r.get("destination"))
                       and (parts[2] is None or parts[2] == r.get("departure_month")),
                       f"I6 {email} {r['route']}: key and attributes disagree")
+        # I7 (R-MM-1): no duplicate (route, fixed month), at most one rolling row per route —
+        # checked on the stored attributes, independently of how the keys are built
+        identities = [(r.get("origin"), r.get("destination"), r.get("departure_month")) for r in rows.values()]
+        self.that(len(identities) == len(set(identities)), f"I7 {email}: duplicate route/month {sorted(map(str, identities))}")
         if expect_rows is not None:
             self.that(len(rows) == expect_rows, f"{email}: expected {expect_rows} rows, found {len(rows)}")
         return rows, q
@@ -356,22 +370,25 @@ def s08_route_edits_onto_one_target(ctx):
 
 
 def s09_edits_pauses_and_creates_at_limit(ctx):
-    """At 10: 20 pauses/resumes + 20 target/month edits + 20 creates. Edits never need a slot.
-    Since R-MM-1 a month edit moves the row to another key (a transaction), so a pause racing it
-    can find the old ID gone (404)."""
+    """At 10: 20 pauses/resumes + 20 in-place edits (target, and the unchanged month) + 20 creates.
+    Edits never need a slot. Unchanged from the 2026-11-06 suite: every edit and pause addresses a
+    row that stays at its key, so only 200/409 are acceptable (never 404). Month edits, which
+    move a row since R-MM-1, race pauses in s22."""
     chk, u, svc = Check("s09_edits_pauses_and_creates_at_limit"), ctx.user("s09"), ctx.service()
     for d in DESTS[:10]:
         svc.create(u, create_body(d))
     pauses = [lambda i=i: svc.patch(u, fid(DESTS[i % 10]), {"alerts_paused": i % 2 == 0}) for i in range(20)]
-    edits = [lambda i=i: svc.patch(u, fid(DESTS[i % 10]), {"target_price": 5000 + i, "departure_month": "2027-03"})
+    edits = [lambda i=i: svc.patch(u, fid(DESTS[i % 10]), {"target_price": 5000 + i, "departure_month": "2027-01"})
              for i in range(20)]
     creates = [lambda d=d: svc.create(u, create_body(d)) for d in DESTS[10:30]]
     res = parallel(pauses + edits + creates)
     chk.responses(res)
-    chk.that(all(s in (200, 404, 409) for s, _ in res[:40]), "edit/pause returned an unexpected status")
+    chk.that(all(s in (200, 409) for s, _ in res[:40]), "edit/pause returned an unexpected status")
     chk.that(all(s == 409 for s, _ in res[40:]), "a create succeeded at 10")
     rows, q = chk.invariants(ctx, u, expect_rows=10)
+    chk.that(sorted(rows) == sorted(fkey(d) for d in DESTS[:10]), "an in-place edit moved or lost a row")
     chk.that(q["version"] == 10, f"edits touched the quota: version {q['version']}")
+    chk.that(ctx.store.committed_for(u) == 10, "an in-place edit or pause used a transaction")
     return chk.result()
 
 
@@ -543,14 +560,28 @@ def s15_same_row_write_storm(ctx):
     chk.that(all(st in (204, 404, 409) for st, _ in res[40:50]), "DELETE: status other than 204/404/409")
     chk.that(all(st in (201, 409) for st, _ in res[50:]), "create: status other than 201/409")
     rows, q = chk.invariants(ctx, u)
-    # The version must have advanced by exactly the number of committed count-changing
-    # transactions — no lost or double quota updates. (Key changes don't touch the quota.)
+    # I3 exactly as in the original s15: the quota version advanced by exactly the committed
+    # count-changing transactions (creates, legacy creates, deletes). Before R-MM-1 every
+    # committed transaction here was count-changing, so "all commits" and "count-changing
+    # commits" were the same number; a month edit is now a key-change transaction that must NOT
+    # move the version, so the two are counted separately and both are checked.
     commits = ctx.store.quota_committed - quota_before
+    key_changes = (ctx.store.committed - committed_before) - commits
+    deleted = sum(st == 204 for st, _ in res[40:50])
+    created = sum(st == 201 for st, _ in res[50:])
+    moved = sum(st == 200 for i, (st, _) in enumerate(res[20:40]) if i % 4 == 1 and _ and _.get("id") != "TPE-TYO")
     chk.that(q["version"] == 6 + commits, f"I3 version {q['version']} != 6 + {commits}")
-    chk.that(5 <= len(rows) <= 8, f"{len(rows)} rows")
-    chk.that(sum(1 for k in rows if k.startswith("TPE-TYO#2027-02")) <= 1, "TPE-TYO 2027-02 created twice")
-    chk.metrics["committed"] = ctx.store.committed - committed_before
-    chk.metrics["quota_committed"] = commits
+    chk.that(key_changes == moved, f"key-change commits {key_changes} != successful month moves {moved}")
+    # Exact row accounting: every count-changing commit is +1 (create) or -1 (delete).
+    chk.that(len(rows) == 6 + commits - 2 * deleted, f"rows {len(rows)} != 6 + {commits} - 2*{deleted}")
+    chk.that(created <= 1, "TPE-TYO 2027-02 created twice")
+    chk.that(moved <= 1, "the rolling row moved twice")
+    # No partial move: a moved row exists exactly once, at its new key, with its provenance.
+    if moved:
+        chk.that(rows.get("TPE-TYO#2027-04", {}).get("previous_route") == "TPE-TYO", "move without its new row")
+    chk.that(5 <= len(rows) <= 8, f"{len(rows)} rows")  # 6 - 1 delete .. 6 + create + move-then-legacy-create
+    chk.metrics.update(committed=ctx.store.committed - committed_before, quota_committed=commits,
+                       key_changes=key_changes, deleted=deleted, created=created, moved=moved)
     return chk.result()
 
 
@@ -722,6 +753,135 @@ def s21_quota_consistency_after_conflicts(ctx):
     return chk.result()
 
 
+def s22_month_moves_race_pauses_at_limit(ctx):
+    """The month-moving half of the original s09, with attributed outcomes. At 10: 20 pauses + 20
+    month moves (2 per row, to DIFFERENT months, 2027-03 and 2027-04) + 20 creates. A 404 is
+    accepted ONLY for a request whose row was moved by another request; every original route
+    exists exactly once afterwards, at its old month or at one of the two new months — never two
+    of them, never none. (Two destinations make a move that skipped its updated_at guard visible:
+    both moves would succeed and the row would be duplicated.)"""
+    chk, u, svc = Check("s22_month_moves_race_pauses_at_limit"), ctx.user("s22"), ctx.service()
+    for d in DESTS[:10]:
+        svc.create(u, create_body(d))
+    pauses = [lambda i=i: svc.patch(u, fid(DESTS[i % 10]), {"alerts_paused": i % 2 == 0}) for i in range(20)]
+    moves = [lambda i=i: svc.patch(u, fid(DESTS[i % 10]), {"target_price": 5000 + i,
+                                                          "departure_month": "2027-03" if i < 10 else "2027-04"})
+             for i in range(20)]
+    creates = [lambda d=d: svc.create(u, create_body(d)) for d in DESTS[10:30]]
+    res = parallel(pauses + moves + creates)
+    chk.responses(res)
+    chk.that(all(s == 409 for s, _ in res[40:]), "a create succeeded at 10")
+    rows, q = chk.invariants(ctx, u, expect_rows=10)
+    for j, d in enumerate(DESTS[:10]):
+        old = fkey(d)
+        present = [k for k in (old, fkey(d, "2027-03"), fkey(d, "2027-04")) if k in rows]
+        chk.that(len(present) == 1, f"{d}: row at {present} (partial or duplicated move)")
+        new = present[0] if present and present[0] != old else None
+        moved_ok = sum(1 for i in range(20) if i % 10 == j and res[20 + i][0] == 200)
+        chk.that(moved_ok == int(new is not None), f"{d}: {moved_ok} successful moves but moved to {new}")
+        for i in range(20):
+            if i % 10 != j:
+                continue
+            for st, label in ((res[i][0], "pause"), (res[20 + i][0], "move")):
+                chk.that(st in (200, 409) or (st == 404 and new is not None), f"{d}: {label} {st} on a row that never moved")
+        if new is not None:
+            chk.that(rows[new].get("previous_route") == old, f"{d}: moved row lost its provenance")
+    chk.that(q["version"] == 10, f"moves or pauses touched the quota: version {q['version']}")
+    return chk.result()
+
+
+def s23_month_moves_race_deletes_of_one_row(ctx):
+    """30 month moves and 30 deletes of the SAME row, beside 4 sibling months. Either the row is
+    deleted (from its old or new key) or it ends up at exactly one key; quota and rows agree."""
+    chk, u, svc = Check("s23_month_moves_race_deletes_of_one_row"), ctx.user("s23"), ctx.service()
+    for m in ("2027-01", "2027-02", "2027-03", "2027-04", "2027-05"):
+        svc.create(u, create_body("TYO", month=m, origin="KHH"))
+    target = fid("TYO", "2027-01", "KHH")
+    quota_before = ctx.store.quota_committed
+    moves = [lambda: svc.patch(u, target, {"departure_month": "2027-09"}) for _ in range(30)]
+    deletes = [lambda: svc.delete(u, target) for _ in range(30)]
+    res = parallel(moves + deletes)
+    chk.responses(res)
+    chk.that(all(s in (200, 404, 409) for s, _ in res[:30]), "move: unexpected status")
+    chk.that(all(s in (204, 404, 409) for s, _ in res[30:]), "delete: unexpected status")
+    moved, deleted = sum(s == 200 for s, _ in res[:30]), sum(s == 204 for s, _ in res[30:])
+    chk.that(moved <= 1 and deleted <= 1, f"moved {moved}, deleted {deleted}")
+    rows, q = chk.invariants(ctx, u, expect_rows=5 - deleted)
+    old, new = fkey("TYO", "2027-01", "KHH"), fkey("TYO", "2027-09", "KHH")
+    chk.that(not (old in rows and new in rows), "the row exists at both keys")
+    chk.that((old in rows or new in rows) == (deleted == 0), "row presence disagrees with the delete result")
+    chk.that(new not in rows or moved == 1, "a row at the new key without a successful move")
+    chk.that(q["count"] == 5 - deleted and q["version"] == 5 + deleted, f"quota {q}")
+    chk.that(ctx.store.quota_committed - quota_before == deleted, "quota commits != deletes")
+    return chk.result()
+
+
+def s24_failed_key_changes_write_nothing(ctx):
+    """Every month/route-change transaction is cancelled (TransactionConflict, or the Put's
+    condition): 409, no row moved, nothing half-written, quota unchanged; the row is then still
+    editable. The atomic counterpart of s13 for key changes."""
+    chk, u = Check("s24_failed_key_changes_write_nothing"), ctx.user("s24")
+    svc = ctx.service(sleep=lambda s: None)
+    for m in ("2027-01", "2027-02"):
+        svc.create(u, create_body("TYO", month=m, origin="KHH"))
+    before_rows, before_q = ctx.rows(u), ctx.quota(u)
+    real = ctx.store.change_route
+    outcomes = []
+    for reasons in (["TransactionConflict", "None"], ["None", "TransactionConflict"], ["ConditionalCheckFailed", "None"]):
+        ctx.store.change_route = lambda *a, r=reasons, **kw: (_ for _ in ()).throw(store_mod.TxCancelled(r))
+        for body in ({"departure_month": "2027-06"}, {"origin": "TPE", "destination": "TYO"}):
+            try:
+                svc.patch(u, fid("TYO", "2027-01", "KHH"), body)
+                outcomes.append("200")
+            except ApiError as e:
+                outcomes.append(e.code)
+    ctx.store.change_route = real
+    chk.that(outcomes == ["conflict"] * 6, f"outcomes {outcomes}")
+    chk.that(ctx.rows(u) == before_rows and ctx.quota(u) == before_q, "a failed key change wrote something")
+    # Real (not injected) cancellation: a move onto an occupied sibling month. The API refuses it
+    # up front (409); the transaction itself must refuse it too when that pre-check is raced, so
+    # the store is also called directly — its Put condition fails and the Delete must not happen.
+    old_key = fkey("TYO", "2027-01", "KHH")
+    try:
+        svc.patch(u, fid("TYO", "2027-01", "KHH"), {"departure_month": "2027-02"})
+        chk.that(False, "a move onto an occupied month succeeded")
+    except ApiError as e:
+        chk.that(e.code in ("duplicate_subscription", "conflict"), f"occupied month: {e.code}")
+    try:
+        ctx.store.change_route(u, old_key, before_rows[old_key]["updated_at"],
+                               {**before_rows[old_key], "route": fkey("TYO", "2027-02", "KHH"), "departure_month": "2027-02"})
+        chk.that(False, "the transaction moved a row onto an occupied month")
+    except store_mod.TxCancelled:
+        pass
+    chk.that(ctx.rows(u) == before_rows and ctx.quota(u) == before_q, "a refused move deleted or overwrote a row")
+    # Stale guard: a key change carrying an outdated updated_at (another write landed after the
+    # read) must be cancelled, not overwrite that write.
+    stale = before_rows[old_key]["updated_at"]
+    try:
+        svc.patch(u, fid("TYO", "2027-01", "KHH"), {"alerts_paused": True})
+    except ApiError as e:
+        chk.that(False, f"the row is gone after refused moves: {e.code}")
+        return chk.result()
+    try:
+        ctx.store.change_route(u, old_key, stale, {**before_rows[old_key], "route": fkey("TYO", "2027-07", "KHH"),
+                                                   "departure_month": "2027-07"})
+        chk.that(False, "a stale key change committed")
+    except store_mod.TxCancelled:
+        pass
+    after = ctx.rows(u)
+    chk.that(sorted(after) == sorted(before_rows) and after[old_key].get("alerts_paused") is True,
+             "a stale key change lost the concurrent pause")
+    # A successful move changes the key and nothing in the quota (count and version).
+    try:
+        body = svc.patch(u, fid("TYO", "2027-01", "KHH"), {"departure_month": "2027-06"})[1]
+        chk.that(body["id"] == "KHH-TYO_2027-06", "the follow-up move failed")
+    except ApiError as e:
+        chk.that(False, f"follow-up move: {e.code}")
+    chk.that(ctx.quota(u) == before_q, f"a successful move touched the quota: {before_q} -> {ctx.quota(u)}")
+    chk.invariants(ctx, u, expect_rows=2)
+    return chk.result()
+
+
 SCENARIOS = [s01_limit_counts_paused_and_expired, s02_concurrent_creates_from_empty,
              s03_concurrent_creates_at_nine, s04_same_route_created_concurrently, s05_concurrent_deletes,
              s06_deletes_and_creates_at_limit, s07_route_edits_of_one_row, s08_route_edits_onto_one_target,
@@ -730,7 +890,8 @@ SCENARIOS = [s01_limit_counts_paused_and_expired, s02_concurrent_creates_from_em
              s15_same_row_write_storm, s16_concurrent_creates_across_months,
              s17_duplicate_month_beside_other_months, s18_concurrent_month_changes,
              s19_edits_and_deletes_of_sibling_months, s20_rolling_and_fixed_overlap,
-             s21_quota_consistency_after_conflicts]
+             s21_quota_consistency_after_conflicts, s22_month_moves_race_pauses_at_limit,
+             s23_month_moves_race_deletes_of_one_row, s24_failed_key_changes_write_nothing]
 
 
 def run_all(ctx, names=None):
