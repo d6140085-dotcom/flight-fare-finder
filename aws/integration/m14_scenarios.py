@@ -12,7 +12,9 @@ concurrency matters, then checks the invariants:
   I3  ``version`` equals the number of committed count-changing transactions (no double init);
   I4  every row is either untouched seed data or the result of a successful response — failed
       requests leave nothing behind and nothing half-written;
-  I5  other users' rows and quota records are byte-for-byte unchanged.
+  I5  other users' rows and quota records are byte-for-byte unchanged;
+  I6  (R-MM-1) every sort key agrees with the stored origin, destination and departure month;
+  I7  (R-MM-1) no two rows of a user share (origin, destination, departure month).
 
 Scenarios only ever use addresses in the reserved example.com domain and only the tables they
 are given; the runner refuses table names that aren't temporary test tables.

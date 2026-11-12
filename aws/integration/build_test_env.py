@@ -5,7 +5,11 @@ Creates only (all deleted with the stack; DeletionPolicy Delete everywhere):
   * flight-m14-it-<run>-quota          (PK email)
   * /aws/lambda/flight-m14-it-<run>-runner log group (1-day retention)
   * IAM role flight-m14-it-<run>-runner-role: data-plane access to the two test tables and its
-    own log group only; explicit Deny on every production DynamoDB table
+    own log group only. Explicit Deny statements: every production DynamoDB table by name; any
+    DynamoDB resource other than the two test tables; every other AWS service by name (SQS,
+    Lambda, EventBridge, Scheduler, API Gateway, SSM, Secrets Manager, SES, SNS, IAM, STS, S3,
+    CloudFormation, KMS); any action outside DynamoDB and the two log-write actions; any log
+    resource other than its own group; any region other than ap-southeast-2
   * Lambda flight-m14-it-<run>-runner with a placeholder; the runner ZIP
     (aws/integration/package_runner.py) is loaded afterwards with UpdateFunctionCode
 No API Gateway, event source, schedule, queue, SSM, S3 or production resource is referenced.
@@ -21,6 +25,8 @@ ACCOUNT, REGION = "379959319681", "ap-southeast-2"
 PROD_TABLES = ["subscriptions", "subscription_quota", "notification_history"]
 DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem", "dynamodb:UpdateItem",
                "dynamodb:DeleteItem", "dynamodb:ConditionCheckItem", "dynamodb:DescribeTable"]
+DENIED_SERVICES = ["sqs:*", "lambda:*", "events:*", "scheduler:*", "apigateway:*", "execute-api:*", "ssm:*",
+                   "secretsmanager:*", "ses:*", "sns:*", "iam:*", "sts:*", "s3:*", "cloudformation:*", "kms:*"]
 PLACEHOLDER = "def handler(event, context):\n    raise RuntimeError('runner code not loaded')\n"
 
 
@@ -50,6 +56,16 @@ def template(run_id, expires="2026-11-30"):
          "Resource": {"Fn::Sub": "${RunnerLogs.Arn}"}},
         {"Sid": "NeverProduction", "Effect": "Deny", "Action": "dynamodb:*",
          "Resource": prod_arns + [a + "/*" for a in prod_arns]},
+        {"Sid": "NoTableButTheTestTables", "Effect": "Deny", "Action": "dynamodb:*",
+         "NotResource": [{"Fn::GetAtt": ["SubsTable", "Arn"]}, {"Fn::Sub": "${SubsTable.Arn}/*"},
+                         {"Fn::GetAtt": ["QuotaTable", "Arn"]}, {"Fn::Sub": "${QuotaTable.Arn}/*"}]},
+        {"Sid": "NoOtherServices", "Effect": "Deny", "Action": DENIED_SERVICES, "Resource": "*"},
+        {"Sid": "NothingElseAtAll", "Effect": "Deny",
+         "NotAction": ["dynamodb:*", "logs:CreateLogStream", "logs:PutLogEvents"], "Resource": "*"},
+        {"Sid": "NoOtherLogGroup", "Effect": "Deny", "Action": "logs:*",
+         "NotResource": [{"Fn::GetAtt": ["RunnerLogs", "Arn"]}, {"Fn::Sub": "${RunnerLogs.Arn}:*"}]},
+        {"Sid": "SydneyOnly", "Effect": "Deny", "Action": "*", "Resource": "*",
+         "Condition": {"StringNotEquals": {"aws:RequestedRegion": REGION}}},
     ]}
     return {
         "AWSTemplateFormatVersion": "2010-09-09",
@@ -68,7 +84,9 @@ def template(run_id, expires="2026-11-30"):
             "Runner": {"Type": "AWS::Lambda::Function", "DependsOn": ["RunnerLogs"], "Properties": {
                 "FunctionName": n["fn"], "Runtime": "python3.12", "Handler": "index.handler",
                 "Role": {"Fn::GetAtt": ["RunnerRole", "Arn"]}, "Timeout": 900, "MemorySize": 1769,
-                "Environment": {"Variables": {"SUBS_TABLE": {"Ref": "SubsTable"}, "QUOTA_TABLE": {"Ref": "QuotaTable"}}},
+                "Environment": {"Variables": {"SUBS_TABLE": {"Ref": "SubsTable"}, "QUOTA_TABLE": {"Ref": "QuotaTable"},
+                                              "EXPECTED_ACCOUNT": ACCOUNT, "EXPECTED_REGION": REGION,
+                                              "RUN_PREFIX": n["stack"]}},
                 "Code": {"ZipFile": PLACEHOLDER}, "Tags": tags}},
         },
         "Outputs": {k: {"Value": {"Ref": v}} for k, v in
