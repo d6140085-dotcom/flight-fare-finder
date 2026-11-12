@@ -38,7 +38,30 @@ export type FareDisplayKind = "expired" | "paused" | "ok" | "no_data" | "error" 
 export interface FareDisplay {
   kind: FareDisplayKind;
   text: string;
+  /** When the fare check ran (ISO-8601 UTC), for ok / no_data / error. */
+  checkedAt?: string;
 }
+
+/** 「最後查詢：2026/11/11 10:30（台灣時間）」. */
+export function checkedAtLabel(isoInstant: string): string {
+  const d = new Date(isoInstant);
+  if (Number.isNaN(d.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `最後查詢：${get("year")}/${get("month")}/${get("day")} ${get("hour")}:${get("minute")}（台灣時間）`;
+}
+
+/** A displayable reference fare: a positive whole TWD amount. Anything else is never shown. */
+export const isValidFare = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value > 0;
 
 const twd = new Intl.NumberFormat("zh-TW");
 
@@ -59,17 +82,31 @@ export function fareDisplay(
   if (!check) return { kind: "pending", text: `尚未查詢 ${month} 的票價，會在下次排程查詢。` };
   switch (check.kind) {
     case "ok":
+      // Never NT$0: a missing, zero or malformed amount is shown as a data problem.
+      if (!isValidFare(check.cheapest_twd)) {
+        return {
+          kind: "error",
+          text: "票價資料異常，暫不顯示金額，會在下次排程重新查詢。",
+          checkedAt: check.checked_at,
+        };
+      }
       return {
         kind: "ok",
-        text: `最近查到 ${month} 出發最低 NT$${twd.format(check.cheapest_twd)}。`,
+        text: `參考票價（來源：Aviasales）：約 NT$${twd.format(check.cheapest_twd)}（${month} 出發）`,
+        checkedAt: check.checked_at,
       };
     case "no_data":
       return {
         kind: "no_data",
         text: `目前沒有 ${month} 的近期票價資料（票價資料來源尚無快取，不代表沒有航班），會持續查詢。`,
+        checkedAt: check.checked_at,
       };
     case "error":
-      return { kind: "error", text: "票價查詢暫時失敗（服務錯誤），會在下次排程自動重試。" };
+      return {
+        kind: "error",
+        text: "票價查詢暫時失敗（服務錯誤），會在下次排程自動重試。",
+        checkedAt: check.checked_at,
+      };
   }
 }
 

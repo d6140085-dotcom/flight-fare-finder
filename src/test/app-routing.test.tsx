@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 async function loadRouter(flag: string | undefined) {
   vi.resetModules();
   if (flag !== undefined) vi.stubEnv("VITE_M14_PROTOTYPE", flag);
-  const mod = await import("@/router");
+  const mod = { ...(await import("@/router")), ...(await import("@/lib/m14/routes")) };
   const leaf = (path: string) => matchRoutes(mod.routes as RouteObject[], path)?.at(-1)?.route;
   return { ...mod, leaf };
 }
@@ -33,6 +33,8 @@ describe("M1.4 prototype route (fail-closed)", () => {
       const r = await loadRouter(flag);
       expect(r.M14_PROTOTYPE_ENABLED).toBe(false);
       expect(r.leaf(`/${r.M14_PROTOTYPE_PATH}`)?.path).toBe("*");
+      // Phase 3A signed-in mock page: also absent.
+      expect(r.leaf(`/${r.M14_APP_PATH}`)?.path).toBe("*");
       expect(r.leaf("/app")?.loader).toBeTypeOf("function");
     },
   );
@@ -44,5 +46,12 @@ describe("M1.4 prototype route (fail-closed)", () => {
     expect(route?.path).toBe("prototype/subscriptions");
     expect(route?.loader).toBeUndefined();
     expect(r.leaf("/app")?.loader).toBeTypeOf("function");
+  });
+
+  it("guards the Phase 3A signed-in mock page with the same login loader as /app", async () => {
+    const r = await loadRouter("true");
+    const route = r.leaf(`/${r.M14_APP_PATH}`);
+    expect(route?.path).toBe("app/subscriptions");
+    expect(route?.loader).toBe(r.leaf("/app")?.loader);
   });
 });

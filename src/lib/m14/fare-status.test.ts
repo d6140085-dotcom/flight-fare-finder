@@ -30,11 +30,12 @@ describe("fare status display", () => {
     expect(fareDisplay(base, NOW, { kind: "no_data", checked_at: at })).toEqual({
       kind: "no_data",
       text: "目前沒有 2027 年 2 月 的近期票價資料（票價資料來源尚無快取，不代表沒有航班），會持續查詢。",
+      checkedAt: at,
     });
     expect(fareDisplay(base, NOW, { kind: "error", checked_at: at }).kind).toBe("error");
     expect(fareDisplay(base, NOW, { kind: "error", checked_at: at }).text).toContain("服務錯誤");
     expect(fareDisplay(base, NOW, { kind: "ok", cheapest_twd: 27500, checked_at: at }).text).toBe(
-      "最近查到 2027 年 2 月 出發最低 NT$27,500。",
+      "參考票價（來源：Aviasales）：約 NT$27,500（2027 年 2 月 出發）",
     );
     expect(fareDisplay(base, NOW, null).kind).toBe("pending");
     // Subscription state wins over any fare data.
@@ -78,7 +79,9 @@ describe("fare_check from the Phase 2A fare check", () => {
 
   it("renders the API shape for every kind", () => {
     const sub = { ...base, route: "TPE-TYO", destination: "TYO", departure_month: "2026-12" };
-    expect(fareDisplay(sub, NOW, ok).text).toBe("最近查到 2026 年 12 月 出發最低 NT$8,062。");
+    expect(fareDisplay(sub, NOW, ok).text).toBe(
+      "參考票價（來源：Aviasales）：約 NT$8,062（2026 年 12 月 出發）",
+    );
     expect(fareDisplay(sub, NOW, noData).kind).toBe("no_data");
     expect(fareDisplay(sub, NOW, error).kind).toBe("error");
   });

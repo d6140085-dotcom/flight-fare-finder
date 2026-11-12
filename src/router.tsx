@@ -5,13 +5,9 @@ import Index from "./pages/Index";
 import AppPage, { appLoader } from "./pages/AppPage";
 import SignIn from "./pages/SignIn";
 import SignUp from "./pages/SignUp";
-import PrototypeSubscriptions from "./pages/PrototypeSubscriptions";
+import M14Subscriptions from "./pages/M14Subscriptions";
 
-// M1.4 prototype (mock data only). Fail-closed: the route exists only when the build set
-// VITE_M14_PROTOTYPE to exactly "true" (dev server and Vercel preview builds; see
-// src/lib/prototype-flag.ts and vite.config.ts). Unset or any other value means no route.
-export const M14_PROTOTYPE_ENABLED = import.meta.env.VITE_M14_PROTOTYPE === "true";
-export const M14_PROTOTYPE_PATH = "prototype/subscriptions";
+import { M14_APP_PATH, M14_PROTOTYPE_ENABLED, M14_PROTOTYPE_PATH } from "./lib/m14/routes";
 
 export const routes: RouteObject[] = [
   {
@@ -24,7 +20,10 @@ export const routes: RouteObject[] = [
       { path: "signin", element: <SignIn /> },
       { path: "signup", element: <SignUp /> },
       ...(M14_PROTOTYPE_ENABLED
-        ? [{ path: M14_PROTOTYPE_PATH, element: <PrototypeSubscriptions /> }]
+        ? [
+            { path: M14_PROTOTYPE_PATH, element: <M14Subscriptions mode="preview" /> },
+            { path: M14_APP_PATH, element: <M14Subscriptions mode="app" />, loader: appLoader },
+          ]
         : []),
       { path: "*", element: <NotFoundPage /> },
     ],
