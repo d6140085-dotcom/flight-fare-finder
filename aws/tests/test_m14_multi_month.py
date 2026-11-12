@@ -449,6 +449,25 @@ class OverlapFlowTests(dedup.Base):
         self.assertEqual(len(self.resend.deliveries), 1)
         self.assertNotIn("claim_target", self.state())        # cleared on commit
 
+    def test_a_taken_over_claim_never_reuses_another_events_pinned_target(self):
+        """Event A pins NT$9,000 (stricter row paused), its outcome is lost and its claim expires.
+        A later fare event B takes the stream over while both rows are active: B must present
+        its own lowest eligible target (NT$8,500), never A's pin."""
+        self.put(ROLLING, 9000)
+        self.put(FIXED, 8500)
+        (a,) = self.fare_check(8000)
+        self.put(FIXED, 8500, alerts_paused=True)
+        self.resend.statuses = ["lost"]
+        d = self.deps(recheck=True)
+        with self.assertRaises(dedup.service.Retry):
+            self.run_msg(a, delivery="sqs-a", d=d)
+        self.assertEqual(self.state()["claim_target"], 9000)
+        self.put(FIXED, 8500)
+        (b,) = self.fare_check(7900)
+        self.assertEqual(self.run_msg(b, at=NOW + timedelta(seconds=600), delivery="sqs-b", d=d), "sent")
+        self.assertIn("8,500", self.shown_target())
+        self.assertNotIn("claim_target", self.state())
+
     def test_without_the_pin_the_retry_would_be_refused(self):
         """Regression proof for the pin: re-computing the target on retry would change the body,
         Resend refuses a reused key with another payload, and the alert could be lost."""

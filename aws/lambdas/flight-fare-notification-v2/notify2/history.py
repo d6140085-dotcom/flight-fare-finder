@@ -101,23 +101,28 @@ class History:
         return (state or {}).get("version", 0) + 1
 
     def pin_target(self, pk, eid, target):
-        """The presented target for this claim: the first attempt's value if one was pinned,
-        else `target`. Raises ClaimConflict if the claim is no longer ours."""
+        """The presented target for this claim: the value this same event pinned on an earlier
+        attempt, else `target` (now pinned). A target pinned by another event whose claim expired
+        and was taken over is never reused (`claim_target_event`). Raises ClaimConflict if the
+        claim is no longer ours."""
         try:
-            r = self.table.update_item(
+            self.table.update_item(
                 Key={"pk": pk, "sent_at": keys.STATE_SK},
-                UpdateExpression="SET claim_target = if_not_exists(claim_target, :t)",
-                ConditionExpression="claim_event = :e",
-                ExpressionAttributeValues={":t": int(target), ":e": eid}, ReturnValues="ALL_NEW")
+                UpdateExpression="SET claim_target = :t, claim_target_event = :e",
+                ConditionExpression="claim_event = :e AND (attribute_not_exists(claim_target_event) OR claim_target_event <> :e)",
+                ExpressionAttributeValues={":t": int(target), ":e": eid})
+            return int(target)
         except ClientError as e:
-            if _code(e) == "ConditionalCheckFailedException":
-                raise ClaimConflict(pk) from None
-            raise
-        return int(r["Attributes"]["claim_target"])
+            if _code(e) != "ConditionalCheckFailedException":
+                raise
+        item = self.table.get_item(Key={"pk": pk, "sent_at": keys.STATE_SK}, ConsistentRead=True).get("Item") or {}
+        if item.get("claim_event") != eid or item.get("claim_target_event") != eid:
+            raise ClaimConflict(pk)
+        return int(item["claim_target"])
 
     def release(self, pk, eid):
         try:
-            self.table.update_item(Key={"pk": pk, "sent_at": keys.STATE_SK}, UpdateExpression="REMOVE claim_event, claim_expires, claim_target",
+            self.table.update_item(Key={"pk": pk, "sent_at": keys.STATE_SK}, UpdateExpression="REMOVE claim_event, claim_expires, claim_target, claim_target_event",
                                    ConditionExpression="claim_event = :e", ExpressionAttributeValues={":e": eid})
         except ClientError as e:
             if _code(e) != "ConditionalCheckFailedException":
@@ -132,7 +137,7 @@ class History:
             "TableName": self.name, "Key": {"pk": {"S": pk}, "sent_at": {"S": keys.STATE_SK}},
             "UpdateExpression": "SET last_sent_at = :t, last_price = :p, last_event_id = :e, version = version + :one, "
                                 "sends = if_not_exists(sends, :zero) + :one, route = :r, #m = :m, subscriber_id = :s "
-                                "REMOVE claim_event, claim_expires, claim_target",
+                                "REMOVE claim_event, claim_expires, claim_target, claim_target_event",
             "ConditionExpression": "claim_event = :e",
             "ExpressionAttributeNames": {"#m": "month"},
             "ExpressionAttributeValues": {":t": {"S": t}, ":p": {"N": str(price)}, ":e": {"S": eid}, ":one": {"N": "1"},
