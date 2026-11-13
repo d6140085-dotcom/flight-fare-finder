@@ -57,6 +57,32 @@ def fkey(dest, month="2027-01", origin="TPE"):
     return f"{origin}-{dest}#{month}"
 
 
+class PageClient:
+    """The service as the M1.4 page calls it: every PATCH and DELETE carries the row's current
+    public version (``if_version``), read just before the request is sent — like a page whose
+    list is up to date. An explicitly given version is sent unchanged (stale-client tests).
+    Everything else passes straight through to the Service."""
+
+    def __init__(self, svc, store):
+        self.svc, self.store = svc, store
+
+    def __getattr__(self, name):
+        return getattr(self.svc, name)
+
+    def version(self, email, sub_id):
+        key = subkeys.key_from_id(sub_id)
+        row = self.store.get_row(email, key) if key else None
+        return Service.version_of(row) if row else "Z" * 22  # well-formed, matches nothing -> 404
+
+    def patch(self, email, sub_id, body):
+        if "if_version" not in body:
+            body = {**body, "if_version": self.version(email, sub_id)}
+        return self.svc.patch(email, sub_id, body)
+
+    def delete(self, email, sub_id, if_version=None):
+        return self.svc.delete(email, sub_id, if_version if if_version is not None else self.version(email, sub_id))
+
+
 class Ctx:
     """Everything a scenario needs: one DynamoDB client, two tables, a run id."""
 
@@ -66,8 +92,12 @@ class Ctx:
         self.cfg = config_mod.load({})
         self.store = InstrumentedStore(client, subs_table, quota_table)
 
-    def service(self, sleep=time.sleep):
+    def raw_service(self, sleep=time.sleep):
         return Service(self.store, self.cfg, clock=lambda: NOW, sleep=sleep, rng=random.Random())
+
+    def service(self, sleep=time.sleep):
+        """The API as the page uses it (PageClient): requests carry the current row version."""
+        return PageClient(self.raw_service(sleep), self.store)
 
     def user(self, scenario, i=0):
         return f"b4-{scenario}-{self.run_id}-{i}@example.com"
@@ -153,6 +183,9 @@ class Check:
         for r in rows.values():
             missing = REQUIRED_ATTRS - set(r) - {"email"}
             self.that(not missing, f"I4 {email} {r['route']}: missing {sorted(missing)}")
+            # I4 (2026-11-13): every row M1.4 wrote (millisecond "…Z" stamp) carries its version token
+            if str(r.get("updated_at", "")).endswith("Z"):
+                self.that(bool(r.get(store_mod.TOKEN_ATTR)), f"I4 {email} {r['route']}: written without a version token")
             parts = subkeys.parse_key(r["route"])
             # I6 (R-MM-1): the sort key agrees with the stored route and month
             self.that(parts is not None and parts[:2] == (r.get("origin"), r.get("destination"))
@@ -505,7 +538,7 @@ def s14_idempotent_transaction_replay(ctx):
     st = ctx.store
     row = {"route": fkey("LON"), "origin": "TPE", "destination": "LON", "departure_month": "2027-01",
            "target_price": 9000, "currency": "TWD", "created_at": "2026-11-05T03:00:00.000Z",
-           "updated_at": "2026-11-05T03:00:00.000Z"}
+           "updated_at": "2026-11-05T03:00:00.000Z", store_mod.TOKEN_ATTR: "s14" + "x" * 19}
     items = [{"Put": {"TableName": st.subs, "Item": store_mod.to_item({**row, "email": u}),
                       "ConditionExpression": "attribute_not_exists(email)"}},
              st._quota_update(u, None, 1, "2026-11-05T03:00:00.000Z")]
@@ -671,7 +704,7 @@ def s19_edits_and_deletes_of_sibling_months(ctx):
     for d in DESTS[:7]:
         svc.create(u, create_body(d))
     key_a, key_b = fkey("TYO", "2027-01", "KHH"), fkey("TYO", "2027-03", "KHH")
-    v_a = ctx.rows(u)[key_a]["updated_at"]
+    v_a = Service.version_of(ctx.rows(u)[key_a])
     deletes = [lambda: svc.delete(u, fid("TYO", "2027-01", "KHH"), v_a) for _ in range(15)]
     edits = [lambda i=i: svc.patch(u, fid("TYO", "2027-02", "KHH"),
                                    [{"target_price": 4000 + i}, {"alerts_paused": True}, {"alerts_paused": False}][i % 3])
@@ -693,13 +726,13 @@ def s19_edits_and_deletes_of_sibling_months(ctx):
     rows, q = chk.invariants(ctx, u, expect_rows=10 - deleted + created)
     at_a = rows.get(key_a)
     if moved:      # B lives at A's ID: a different subscription, with a new version and provenance
-        chk.that(at_a is not None and at_a.get("previous_route") == key_b and at_a.get("updated_at") != v_a,
+        chk.that(at_a is not None and at_a.get("previous_route") == key_b and Service.version_of(at_a) != v_a,
                  "the subscription moved into A's ID was lost or is indistinguishable from A")
         chk.that(key_b not in rows, "partial move: B still at 2027-03")
     elif deleted:  # A gone, B untouched at 2027-03
         chk.that(at_a is None and key_b in rows, "after A's delete: wrong rows at 2027-01/2027-03")
     else:          # nothing deleted, so nothing could move in
-        chk.that(at_a is not None and at_a.get("updated_at") == v_a and key_b in rows, "A or B changed without a 2xx")
+        chk.that(at_a is not None and Service.version_of(at_a) == v_a and key_b in rows, "A or B changed without a 2xx")
     chk.that(fkey("TYO", "2027-02", "KHH") in rows, "the edited sibling month disappeared")
     chk.that(q["version"] == 10 + deleted + created, f"I3 version {q['version']}")
     chk.metrics.update(deleted=deleted, moved=moved, created=created)
@@ -868,23 +901,23 @@ def s24_failed_key_changes_write_nothing(ctx):
     except ApiError as e:
         chk.that(e.code in ("duplicate_subscription", "conflict"), f"occupied month: {e.code}")
     try:
-        ctx.store.change_route(u, old_key, before_rows[old_key]["updated_at"],
+        ctx.store.change_route(u, before_rows[old_key],
                                {**before_rows[old_key], "route": fkey("TYO", "2027-02", "KHH"), "departure_month": "2027-02"})
         chk.that(False, "the transaction moved a row onto an occupied month")
     except store_mod.TxCancelled:
         pass
     chk.that(ctx.rows(u) == before_rows and ctx.quota(u) == before_q, "a refused move deleted or overwrote a row")
-    # Stale guard: a key change carrying an outdated updated_at (another write landed after the
+    # Stale guard: a key change based on an outdated row version (another write landed after the
     # read) must be cancelled, not overwrite that write.
-    stale = before_rows[old_key]["updated_at"]
+    stale = before_rows[old_key]
     try:
         svc.patch(u, fid("TYO", "2027-01", "KHH"), {"alerts_paused": True})
     except ApiError as e:
         chk.that(False, f"the row is gone after refused moves: {e.code}")
         return chk.result()
     try:
-        ctx.store.change_route(u, old_key, stale, {**before_rows[old_key], "route": fkey("TYO", "2027-07", "KHH"),
-                                                   "departure_month": "2027-07"})
+        ctx.store.change_route(u, stale, {**before_rows[old_key], "route": fkey("TYO", "2027-07", "KHH"),
+                                          "departure_month": "2027-07"})
         chk.that(False, "a stale key change committed")
     except store_mod.TxCancelled:
         pass

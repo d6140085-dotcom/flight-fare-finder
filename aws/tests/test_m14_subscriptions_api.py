@@ -44,6 +44,7 @@ if ddb_local.boto3 is not None:
 CFG = config_mod.load({})
 NOW = datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc)  # 11:00 Taipei; window 2026-12 … 2027-11
 USER = "user@example.com"
+FRESH = object()  # test helpers: "send the row's current version, like an up-to-date page"
 OTHER = "other@example.com"
 DESTS = ["OSA", "NGO", "FUK", "OKA", "SPK", "KMJ", "PUS", "CJU", "HKG", "MFM", "BKK", "CNX", "HKT",
          "SIN", "KUL", "PEN", "BKI", "MNL", "CEB", "SGN", "HAN", "DAD", "DPS", "LON", "PAR", "FRA",
@@ -450,12 +451,25 @@ class LocalDynamoTestCase(unittest.TestCase):
         return self.call("POST /subscriptions", {"origin": origin, "destination": dest,
                                                  "departure_month": month, "target_price": target}, token=token)
 
-    def patch(self, sub_id, body, token="good"):
+    def current_version(self, sub_id, email=USER):
+        """What an up-to-date page would send: the row's current public version (a well-formed
+        unknown token when the row or the ID doesn't exist, so the API answers 404/400)."""
+        key = subkeys.key_from_id(sub_id)
+        row = self.store.get_row(email, key) if key else None
+        return service_mod.Service.version_of(row) if row else "Z" * 22
+
+    def patch(self, sub_id, body, token="good", version=FRESH):
+        """PATCH as the page sends it: with the current if_version unless the body already has
+        one or version=None (a raw request without it)."""
+        if isinstance(body, dict) and "if_version" not in body and version is not None:
+            body = {**body, "if_version": self.current_version(sub_id) if version is FRESH else version}
         return self.call("PATCH /subscriptions/{id}", body, path={"id": sub_id}, token=token)
 
-    def delete(self, sub_id, if_updated_at=None):
+    def delete(self, sub_id, if_version=FRESH):
+        if if_version is FRESH:
+            if_version = self.current_version(sub_id)
         return self.call("DELETE /subscriptions/{id}", path={"id": sub_id},
-                         query={"if_updated_at": if_updated_at} if if_updated_at else None)
+                         query={"if_version": if_version} if if_version is not None else None)
 
     def raw(self, email=USER):
         return {r["route"]: r for r in self.store.list_rows(email)}
@@ -497,12 +511,13 @@ class CrudTests(LocalDynamoTestCase):
     def test_create_and_list(self):
         status, body = self.create("LON", month="2027-03", target=28000)
         self.assertEqual(status, 201)
-        self.assertEqual(body | {"created_at": None, "updated_at": None}, {
+        self.assertRegex(body["version"], r"^[A-Za-z0-9_-]{22}$")
+        self.assertEqual(body | {"created_at": None, "updated_at": None, "version": None}, {
             "id": "TPE-LON_2027-03", "route": "TPE-LON", "origin": "TPE", "destination": "LON",
             "origin_name": {"zh": "台北", "en": "Taipei"}, "destination_name": {"zh": "倫敦", "en": "London"},
             "departure_month": "2027-03", "month_mode": "fixed", "effective_month": "2027-03",
             "status": "active", "target_price": 28000, "currency": "TWD", "alerts_paused": False,
-            "plan_name": None, "created_at": None, "updated_at": None, "fare_check": None})
+            "plan_name": None, "created_at": None, "updated_at": None, "version": None, "fare_check": None})
         self.assertRegex(body["updated_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
         status, listing = self.call("GET /subscriptions")
         self.assertEqual(status, 200)
@@ -691,21 +706,47 @@ class PatchTests(LocalDynamoTestCase):
         self.assertEqual(body["id"], "TPE-PAR_2027-03")
 
     def test_optimistic_concurrency(self):
-        status, body = self.patch(self.id, {"target_price": 1, "if_updated_at": "2020-01-01T00:00:00.000Z"})
+        v1 = self.row["version"]
+        status, body = self.patch(self.id, {"target_price": 1, "if_version": "Q" * 22})
         self.assertEqual((status, body["error"]), (409, "conflict"))
-        ok = self.patch(self.id, {"target_price": 2, "if_updated_at": self.row["updated_at"]})
+        ok = self.patch(self.id, {"target_price": 2, "if_version": v1})
         self.assertEqual(ok[0], 200)
-        stale = self.patch(self.id, {"target_price": 3, "if_updated_at": self.row["updated_at"]})
+        self.assertNotEqual(ok[1]["version"], v1)  # every successful mutation returns a new version
+        stale = self.patch(self.id, {"target_price": 3, "if_version": v1})
         self.assertEqual(stale[1]["error"], "conflict")
-        stale_month = self.patch(self.id, {"departure_month": "2027-04", "if_updated_at": self.row["updated_at"]})
+        stale_month = self.patch(self.id, {"departure_month": "2027-04", "if_version": v1})
         self.assertEqual(stale_month[1]["error"], "conflict")
+        self.assertEqual(self.patch(self.id, {"target_price": 4, "if_version": ok[1]["version"]})[0], 200)
+
+    def test_version_is_required_and_validated(self):
+        status, body = self.patch(self.id, {"target_price": 1}, version=None)
+        self.assertEqual((status, body["error"]), (428, "version_required"))
+        status, body = self.delete(self.id, if_version=None)
+        self.assertEqual((status, body["error"]), (428, "version_required"))
+        for bad in ("", "short", 123, "legacy-xyz", "x" * 23):
+            self.assertEqual(self.patch(self.id, {"target_price": 1, "if_version": bad})[1]["error"], "invalid_version", bad)
+        self.assertEqual(self.delete(self.id, if_version="short")[1]["error"], "invalid_version")
+        # The old timestamp token is not accepted as a substitute (contract §4.5).
+        status, body = self.patch(self.id, {"target_price": 1, "if_updated_at": self.row["updated_at"]}, version=None)
+        self.assertEqual((status, body["error"]), (400, "unknown_field"))
+        self.assertEqual(self.raw()[fkey("LON")]["target_price"], 28000)  # nothing written
+        self.assertEqual(self.quota()["count"], 1)
+
+    def test_versions_are_random_and_never_derived_from_the_clock(self):
+        """Fixed clock: two rows created at the same instant share updated_at but never a version."""
+        other = self.create("PAR")[1]
+        self.assertEqual(other["updated_at"], self.row["updated_at"])
+        self.assertNotEqual(other["version"], self.row["version"])
+        self.assertRegex(other["version"], r"^[A-Za-z0-9_-]{22}$")
+        self.assertEqual(self.raw()[fkey("PAR")]["version_token"], other["version"])
 
     def test_concurrent_change_between_read_and_write_is_a_conflict(self):
         real_get = self.store.get_row
 
         def get_then_someone_edits(email, route):
             row = real_get(email, route)
-            self.store.update(email, route, {"target_price": 1, "updated_at": "2099-01-01T00:00:00.000Z"}, [])
+            self.store.update(email, row, {"target_price": 1, "updated_at": "2099-01-01T00:00:00.000Z",
+                                           "version_token": "N" * 22}, [])
             return row
 
         with mock.patch.object(self.store, "get_row", side_effect=get_then_someone_edits):
@@ -719,7 +760,8 @@ class PatchTests(LocalDynamoTestCase):
             row = real_get(email, route)
             seen["n"] += 1
             if seen["n"] == 1:
-                self.store.update(email, route, {"target_price": 1, "updated_at": "2099-01-01T00:00:00.000Z"}, [])
+                self.store.update(email, row, {"target_price": 1, "updated_at": "2099-01-01T00:00:00.000Z",
+                                               "version_token": "N" * 22}, [])
             return row
 
         with mock.patch.object(self.store, "get_row", side_effect=get_then_someone_edits):
@@ -738,14 +780,15 @@ class PatchTests(LocalDynamoTestCase):
             self.assertEqual(self.patch(bad, {"target_price": 1})[1]["error"], "invalid_route", bad)
 
     def test_delete(self):
-        status, body = self.delete(self.id, if_updated_at="2020-01-01T00:00:00.000Z")
+        status, body = self.delete(self.id, if_version="Q" * 22)
         self.assertEqual((status, body["error"]), (409, "conflict"))
-        self.assertEqual(self.delete(self.id, if_updated_at=self.row["updated_at"])[0], 204)
-        self.assertEqual(self.delete(self.id)[0], 404)
+        self.assertEqual(self.delete(self.id, if_version=self.row["version"])[0], 204)
+        self.assertEqual(self.delete(self.id, if_version=self.row["version"])[0], 404)
         self.assertEqual(self.quota()["count"], 0)
 
     def test_older_route_path_parameter_is_still_accepted(self):
-        status, body = self.call("PATCH /subscriptions/{route}", {"target_price": 7}, path={"route": self.id})
+        status, body = self.call("PATCH /subscriptions/{route}", {"target_price": 7, "if_version": self.row["version"]},
+                                 path={"route": self.id})
         self.assertEqual((status, body["target_price"]), (200, 7))
 
 
@@ -937,7 +980,7 @@ class HandlerSecurityTests(LocalDynamoTestCase):
         # inside the caller's own partition (the session's email).
         self.assertEqual(self.patch(fid("LON"), {"target_price": 1, "email": OTHER})[0], 404)
         self.assertEqual(self.call("DELETE /subscriptions/{id}", path={"id": fid("LON")},
-                                   query={"email": OTHER})[0], 404)
+                                   query={"email": OTHER, "if_version": "Z" * 22})[0], 404)
         status, body = self.create("LON")  # creates the caller's own row, not theirs
         self.assertEqual(status, 201)
         self.assertEqual(self.raw(OTHER), theirs)
@@ -963,8 +1006,14 @@ class TransactionShapeTests(LocalDynamoTestCase):
         self.spy.stop()
         super().tearDown()
 
+    LEGACY_GUARD = "attribute_exists(email) AND attribute_not_exists(#gtok) AND "
+
     def kinds(self, call):
-        return [(op, body["TableName"], body.get("ConditionExpression")) for item in call["TransactItems"]
+        """(op, table, condition); a legacy-row guard (one clause per stored attribute) is shown
+        as "legacy-guard"."""
+        def cond(c):
+            return "legacy-guard" if c and c.startswith(self.LEGACY_GUARD) else c
+        return [(op, body["TableName"], cond(body.get("ConditionExpression"))) for item in call["TransactItems"]
                 for op, body in item.items()]
 
     def assert_well_formed(self, call):
@@ -984,7 +1033,7 @@ class TransactionShapeTests(LocalDynamoTestCase):
              ("Update", self.quota_table, "attribute_not_exists(email)")],
             [("Put", self.subs_table, "attribute_not_exists(email)"), ("Update", self.quota_table, "#v = :v")],
             # bound to the version the request read (ABA guard, 2026-11-13)
-            [("Delete", self.subs_table, "attribute_exists(email) AND updated_at = :u"), ("Update", self.quota_table, "#v = :v")],
+            [("Delete", self.subs_table, "legacy-guard"), ("Update", self.quota_table, "#v = :v")],  # M1 row: no token
             [("Put", self.subs_table, "attribute_not_exists(email)"), ("Update", self.quota_table, "#v = :v")],
         ])
         for c in self.calls:
@@ -993,15 +1042,19 @@ class TransactionShapeTests(LocalDynamoTestCase):
         self.assert_invariants()
 
     def test_delete_of_a_row_without_updated_at_is_bound_to_that_row(self):
-        """M1 rows may lack updated_at: the delete then requires attribute_not_exists(updated_at),
-        so it still can only remove the row it read, never a newer one at the same key."""
+        """An M1 row with neither version_token nor updated_at: its public version is legacy-…,
+        and the delete is guarded by every stored attribute (contract §4.5)."""
         self.seed(USER, "TPE-TYO", plan_name="tokyo")
         self.client.update_item(TableName=self.subs_table, Key=store_mod.to_item({"email": USER, "route": "TPE-TYO"}),
                                 UpdateExpression="REMOVE updated_at")
+        self.assertRegex(self.current_version("TPE-TYO"), r"^legacy-[0-9a-f]{32}$")
         self.calls.clear()
-        self.delete("TPE-TYO")
+        self.assertEqual(self.delete("TPE-TYO")[0], 204)
         self.assertEqual(self.kinds(self.calls[0])[0],
-                         ("Delete", self.subs_table, "attribute_exists(email) AND attribute_not_exists(updated_at)"))
+                         ("Delete", self.subs_table, "legacy-guard"))
+        cond = self.calls[0]["TransactItems"][0]["Delete"]
+        self.assertEqual(sorted(cond["ExpressionAttributeNames"].values()),
+                         sorted(["version_token", "created_at", "currency", "destination", "origin", "plan_name", "target_price"]))
         self.assertEqual(self.raw(), {})
         self.assert_invariants()
 
@@ -1013,7 +1066,7 @@ class TransactionShapeTests(LocalDynamoTestCase):
             self.patch(subkeys.public_id(current), body)
             self.assertEqual(len(self.calls), 1, body)
             self.assertEqual([k for k in self.kinds(self.calls[0])],
-                             [("Delete", self.subs_table, "attribute_exists(email) AND updated_at = :u"),
+                             [("Delete", self.subs_table, "attribute_exists(email) AND #gtok = :gtok AND #gupd = :gupd"),
                               ("Put", self.subs_table, "attribute_not_exists(email)")], body)
             self.assert_well_formed(self.calls[0])
         self.assertEqual(sorted(self.raw()), ["KHH-LON#2027-05"])
@@ -1147,7 +1200,7 @@ class TransactionConflictRegressionTests(LocalDynamoTestCase):
         self.create("LON")
         patcher, _ = self.fail_first_updates(1)
         with patcher, self.assertRaises(store_mod.WriteConflict) as e:
-            self.store.update(USER, fkey("LON"), {"target_price": 1}, [])
+            self.store.update(USER, self.store.get_row(USER, fkey("LON")), {"target_price": 1}, [])
         self.assertEqual(e.exception.code, "TransactionConflictException")
         self.assertTrue(e.exception.retryable)
 
@@ -1248,7 +1301,8 @@ class LegacyStaleUpdateTests(LocalDynamoTestCase):
             rows = real_list(email)
             if not state["done"]:  # between our read and our write, someone pauses the row
                 state["done"] = True
-                self.svc.patch(USER, "TPE-TYO", {"alerts_paused": True, "target_price": 8888})
+                self.svc.patch(USER, "TPE-TYO", {"alerts_paused": True, "target_price": 8888,
+                                                 "if_version": self.current_version("TPE-TYO")})
             return rows
 
         with mock.patch.object(self.store, "list_rows", side_effect=list_then_concurrent_patch):
@@ -1299,6 +1353,10 @@ class ConcurrencyTests(LocalDynamoTestCase):
     def svc_call(self, method, *args):
         """Call the service directly (the handler's auth patch isn't thread-relevant)."""
         try:
+            if method == "patch" and "if_version" not in args[2]:      # as an up-to-date page sends it
+                args = (args[0], args[1], {**args[2], "if_version": self.current_version(args[1], args[0])})
+            if method == "delete" and len(args) == 2:
+                args = (*args, self.current_version(args[1], args[0]))
             return getattr(self.svc, method)(*args)
         except ApiError as e:
             return e.status, {"error": e.code}

@@ -1,6 +1,9 @@
 """Subscription operations (contract §4, §5, §8.2). Every method returns (status, body) or
 raises ApiError. The clock, sleep and randomness are injectable for tests."""
+import hashlib
+import json
 import random
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -8,7 +11,7 @@ from . import subkeys
 from . import validation as v
 from .errors import ApiError
 from .months import current_month, effective_month, is_expired, selectable_months
-from .store import ConditionFailed, TxCancelled, WriteConflict
+from .store import TOKEN_ATTR, ConditionFailed, TxCancelled, WriteConflict, token_current
 
 MAX_ATTEMPTS = 3
 BACKOFF_BASE_S = 0.025
@@ -21,12 +24,24 @@ def _iso(dt):
 
 
 class Service:
-    def __init__(self, store, cfg, clock=None, sleep=time.sleep, rng=None):
+    def __init__(self, store, cfg, clock=None, sleep=time.sleep, rng=None, new_token=None):
         self.store = store
         self.cfg = cfg
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.sleep = sleep
         self.rng = rng or random.Random()
+        # Row version tokens: 128 random bits from the OS CSPRNG, never derived from the clock.
+        self.new_token = new_token or (lambda: secrets.token_urlsafe(16))
+
+    @staticmethod
+    def version_of(row):
+        """The public, opaque row version (contract §4.5): the stored token when M1.4 wrote the
+        row last, otherwise (M1 row, or a row the M1 Lambda changed since) ``legacy-`` + a digest
+        of every stored attribute."""
+        if token_current(row):
+            return row[TOKEN_ATTR]
+        body = json.dumps({k: v for k, v in row.items() if k != "email"}, sort_keys=True, default=str)
+        return "legacy-" + hashlib.sha256(body.encode()).hexdigest()[:32]
 
     # ---- helpers -----------------------------------------------------------------------
     def _stamp(self, after=None):
@@ -76,6 +91,7 @@ class Service:
             "plan_name": row.get("plan_name"),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
+            "version": self.version_of(row),
             "fare_check": None,  # Phase 2 (contract §3.4)
         }
 
@@ -110,7 +126,8 @@ class Service:
                 raise ApiError(409, "limit_reached", {"max": self.cfg.max_subscriptions, "used": len(rows)})
             stamp = self._stamp()
             row = {"route": key, "origin": o, "destination": d, "departure_month": month,
-                   "target_price": target, "currency": "TWD", "created_at": stamp, "updated_at": stamp}
+                   "target_price": target, "currency": "TWD", "created_at": stamp, "updated_at": stamp,
+                   TOKEN_ATTR: self.new_token()}
             try:
                 self.store.create(email, row, quota, len(rows) + 1, stamp)
                 return 201, self.view(row, now)
@@ -123,13 +140,12 @@ class Service:
         raise ApiError(409, "conflict")
 
     # ---- DELETE /subscriptions/{id} ----------------------------------------------------
-    def delete(self, email, sub_id, if_updated_at=None):
+    def delete(self, email, sub_id, if_version=None):
         route = v.id_param(sub_id)  # the sort key; always within the caller's own partition
-        # The version this request deletes: the client's if_updated_at, else the version of the
-        # row it reads first. Every attempt is bound to it, so a retry can never delete a
-        # different subscription that was moved into the same ID meanwhile (ABA) or a newer
-        # state of the row than the one the request saw (409 conflict, like PATCH).
-        expected, bound = if_updated_at, if_updated_at is not None
+        # The client must say which row version it deletes (contract §4.5): a stale or missing
+        # version is never replaced by a freshly read one, so a request aimed at subscription A
+        # can never delete a subscription B that later reused A's ID.
+        expected = v.if_version(if_version)
         for attempt in range(MAX_ATTEMPTS):
             self._backoff(attempt)
             quota = self.store.get_quota(email)
@@ -137,19 +153,18 @@ class Service:
             row = next((r for r in rows if r["route"] == route), None)
             if row is None:
                 raise ApiError(404, "not_found")
-            if not bound:
-                expected, bound = row.get("updated_at"), True
-            if row.get("updated_at") != expected:
+            if self.version_of(row) != expected:
                 raise ApiError(409, "conflict")
             stamp = self._stamp()
             try:
-                self.store.delete(email, route, quota, len(rows) - 1, stamp, expected)
+                self.store.delete(email, row, quota, len(rows) - 1, stamp)
                 return 204, None
             except TxCancelled as e:
                 if e.failed(0):
                     if self.store.get_row(email, route) is None:
                         raise ApiError(404, "not_found") from None
                     raise ApiError(409, "conflict") from None
+                # quota contention only: re-read; the row must still be exactly the expected version
             except WriteConflict:
                 raise ApiError(409, "conflict") from None  # outcome unknown: never retry blindly
         raise ApiError(409, "conflict")
@@ -158,12 +173,12 @@ class Service:
     def patch(self, email, sub_id, body):
         now = self.clock()
         route = v.id_param(sub_id)  # the sort key
-        v.patch_body(body)
+        v.patch_body(body)  # includes the required if_version (428 / 400)
         row = self.store.get_row(email, route)
         if row is None:
             raise ApiError(404, "not_found")
         stored_at = row.get("updated_at")
-        if "if_updated_at" in body and body["if_updated_at"] != stored_at:
+        if self.version_of(row) != body["if_version"]:
             raise ApiError(409, "conflict")
         cur_o, cur_d, _ = subkeys.parse_key(route)
         o, d = row.get("origin") or cur_o, row.get("destination") or cur_d
@@ -186,7 +201,7 @@ class Service:
         if (month, target, paused) == (stored_month, int(row["target_price"]), bool(row.get("alerts_paused", False))):
             return 200, self.view(row, now)  # nothing to change, no write
         stamp = self._stamp(after=stored_at)
-        sets = {"target_price": target, "updated_at": stamp}
+        sets = {"target_price": target, "updated_at": stamp, TOKEN_ATTR: self.new_token()}
         removes = []
         if month is not None:
             sets["departure_month"] = month
@@ -195,8 +210,8 @@ class Service:
         else:
             removes.append("alerts_paused")  # stored only when true (§3.1)
         try:
-            # The read value of updated_at is the optimistic lock, even without if_updated_at.
-            new = self.store.update(email, route, sets, removes, expected_updated_at=stored_at)
+            # Only if the stored row is still exactly the version the client named (guard).
+            new = self.store.update(email, row, sets, removes)
         except ConditionFailed:
             if self.store.get_row(email, route) is None:
                 raise ApiError(404, "not_found") from None
@@ -220,9 +235,9 @@ class Service:
                    # to another key. A month-only change keeps created_at (same subscription).
                    "previous_route": row["route"],
                    "created_at": row.get("created_at") if same_route and row.get("created_at") else stamp,
-                   "updated_at": stamp}
+                   "updated_at": stamp, TOKEN_ATTR: self.new_token()}
         try:
-            self.store.change_route(email, row["route"], row.get("updated_at"), new_row)
+            self.store.change_route(email, row, new_row)
         except TxCancelled as e:
             if e.failed(1):
                 raise ApiError(409, "duplicate_subscription", dup) from None
@@ -253,14 +268,14 @@ class Service:
                 stamp = self._stamp(after=existing.get("updated_at"))
                 try:
                     # Upsert semantics of M1.1: keeps created_at, pause state and departure_month.
-                    self.store.update(email, route, {"plan_name": plan, "origin": o, "destination": d,
-                                                     "target_price": target, "currency": "TWD",
-                                                     "updated_at": stamp}, [],
+                    self.store.update(email, existing, {"plan_name": plan, "origin": o, "destination": d,
+                                                        "target_price": target, "currency": "TWD",
+                                                        "updated_at": stamp, TOKEN_ATTR: self.new_token()}, [],
                                       # Only on top of the state just read: a concurrent edit
                                       # makes this a ConditionFailed and the loop re-reads, so
                                       # updated_at never moves backwards and nothing unseen is
-                                      # overwritten (a blind write could reuse an old token).
-                                      expected_updated_at=existing.get("updated_at"))
+                                      # overwritten (M1 upsert semantics, internal guard only).
+                                      )
                 except (ConditionFailed, WriteConflict) as e:
                     if isinstance(e, WriteConflict) and not e.retryable:
                         raise ApiError(409, "conflict") from None
@@ -274,7 +289,8 @@ class Service:
                 raise ApiError(409, "limit_reached", {"max": self.cfg.max_subscriptions, "used": len(rows)})
             stamp = self._stamp()
             row = {"route": route, "origin": o, "destination": d, "plan_name": plan, "target_price": target,
-                   "currency": "TWD", "created_at": stamp, "updated_at": stamp}  # rolling: no month
+                   "currency": "TWD", "created_at": stamp, "updated_at": stamp,  # rolling: no month
+                   TOKEN_ATTR: self.new_token()}
             try:
                 self.store.create(email, row, quota, len(rows) + 1, stamp)
                 return 200, {"route": route, "plan_name": plan, "target_price": target, "currency": "TWD",

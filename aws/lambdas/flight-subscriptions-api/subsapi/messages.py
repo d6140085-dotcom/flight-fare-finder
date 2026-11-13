@@ -39,6 +39,8 @@ def message(code, cfg, now, details=None):
         "not_found": "找不到這筆訂閱，可能已被刪除。",
         "limit_reached": f"每位使用者最多 {cfg.max_subscriptions} 筆航線訂閱（已暫停與已過期的訂閱也算在內），請先刪除不需要的訂閱。",
         "conflict": "這筆訂閱剛剛被其他操作變更了，請重新整理後再試一次。",
+        "version_required": "請重新整理頁面後再試一次。",
+        "invalid_version": "請重新整理頁面後再試一次。",
         "not_found_route": "找不到這個 API 路徑。",
         "internal_error": "系統暫時發生錯誤，請稍後再試。",
     }

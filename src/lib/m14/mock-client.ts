@@ -2,7 +2,7 @@
 // It follows the subscriptions API contract (docs/api/m1.4-subscriptions-api.md): the same
 // validation order and error codes, the strict 10-record limit, one subscription per (route,
 // fixed month) plus one rolling row per route (R-MM-1), public IDs in update/remove, atomic
-// route and month changes, optimistic concurrency on updated_at, derived status/effective month.
+// route and month changes, optimistic concurrency on random row versions (§4.5), derived status/effective month.
 // It never calls fetch, Supabase or AWS, and every row and fare is fake demo data.
 import { POLICY, airport } from "./catalog";
 import { parseSubscriptionId, subscriptionId } from "./subscription-id";
@@ -57,6 +57,7 @@ const HTTP_STATUS: Partial<Record<ApiErrorCode, number>> = {
   duplicate_subscription: 409,
   limit_reached: 409,
   conflict: 409,
+  version_required: 428,
   not_found: 404,
   unauthorized: 401,
   internal_error: 500,
@@ -67,6 +68,18 @@ const fail = (code: ApiErrorCode, details: Record<string, unknown> = {}): never 
 };
 
 const CHECKED_AT = "2026-11-11T02:30:00Z";
+
+const VERSION_RE = /^(?:[A-Za-z0-9_-]{22}|legacy-[0-9a-f]{32})$/;
+
+/** 128 random bits, base64url (22 chars) — the same shape as the API's version tokens. */
+function randomVersion(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
 
 /**
  * Mock fare checks for the demo rows, keyed by route only and valid for the row's current
@@ -209,7 +222,25 @@ export class MockSubscriptionsClient implements SubscriptionsClient {
     if (this.latencyMs > 0) await new Promise((res) => setTimeout(res, this.latencyMs));
   }
 
-  /** Strictly increasing millisecond timestamps (the API's concurrency token, §12). */
+  /** Row versions, like the API's version_token: every row object the reducer produces (a new
+   * object for every create, edit, move, pause or resume) gets its own random version. */
+  private readonly versions = new WeakMap<RouteSubscription, string>();
+
+  private versionOf(r: RouteSubscription): string {
+    let v = this.versions.get(r);
+    if (v === undefined) {
+      v = randomVersion();
+      this.versions.set(r, v);
+    }
+    return v;
+  }
+
+  private checkVersion(value: unknown): void {
+    if (value === undefined || value === null) fail("version_required");
+    if (typeof value !== "string" || !VERSION_RE.test(value)) fail("invalid_version");
+  }
+
+  /** Strictly increasing millisecond timestamps (informational updated_at). */
   private stamp(): string {
     const t = Math.max(this.now().getTime(), this.clock + 1);
     this.clock = t;
@@ -225,6 +256,7 @@ export class MockSubscriptionsClient implements SubscriptionsClient {
     };
     return {
       ...r,
+      version: this.versionOf(r),
       origin_name: name(r.origin),
       destination_name: name(r.destination),
       month_mode: r.departure_month === null ? "rolling" : "fixed",
@@ -302,16 +334,16 @@ export class MockSubscriptionsClient implements SubscriptionsClient {
   async update(id: string, patch: PatchRequest): Promise<SubscriptionDto> {
     await this.delay();
     if (!parseSubscriptionId(id)) fail("invalid_route");
-    const keys = Object.keys(patch).filter((k) => k !== "if_updated_at");
+    const keys = Object.keys(patch).filter((k) => k !== "if_version");
     if (keys.length === 0) fail("empty_patch");
     if ((patch.origin === undefined) !== (patch.destination === undefined)) {
       fail("route_change_incomplete");
     }
+    this.checkVersion(patch.if_version);
     const old = this.rows.find((r) => r.id === id);
     if (!old) return fail("not_found");
-    if (patch.if_updated_at !== undefined && patch.if_updated_at !== old.updated_at) {
-      fail("conflict");
-    }
+    // Never replaced by a freshly read version: a stale client gets `conflict` (§4.5).
+    if (patch.if_version !== this.versionOf(old)) fail("conflict");
     let current = old;
     const touchesRoute = patch.origin !== undefined;
     if (touchesRoute || patch.target_price !== undefined || patch.departure_month !== undefined) {
@@ -349,12 +381,14 @@ export class MockSubscriptionsClient implements SubscriptionsClient {
     return this.dto(current);
   }
 
-  async remove(id: string, ifUpdatedAt?: string): Promise<void> {
+  async remove(id: string, ifVersion: string): Promise<void> {
     await this.delay();
     if (!parseSubscriptionId(id)) fail("invalid_route");
+    this.checkVersion(ifVersion);
     const old = this.rows.find((r) => r.id === id);
     if (!old) return fail("not_found");
-    if (ifUpdatedAt !== undefined && ifUpdatedAt !== old.updated_at) fail("conflict");
+    // Only that exact version: a request for subscription A never deletes a B that reused A's ID.
+    if (ifVersion !== this.versionOf(old)) fail("conflict");
     this.rows = this.rows.filter((r) => r.id !== id);
   }
 

@@ -74,8 +74,8 @@ export function SubscriptionsManager({
     mutationFn: ({ id, patch }: { id: string; patch: PatchRequest }) => client.update(id, patch),
   });
   const remove = useMutation({
-    mutationFn: ({ id, ifUpdatedAt }: { id: string; ifUpdatedAt: string }) =>
-      client.remove(id, ifUpdatedAt),
+    mutationFn: ({ id, ifVersion }: { id: string; ifVersion: string }) =>
+      client.remove(id, ifVersion),
   });
 
   async function run<T>(
@@ -245,7 +245,7 @@ export function SubscriptionsManager({
                   links={view.links ? <SearchLinks links={view.links} /> : null}
                   busy={busyId === sub.id}
                   onEdit={(value) => {
-                    const patch: PatchRequest = { if_updated_at: sub.updated_at };
+                    const patch: PatchRequest = { if_version: sub.version };
                     if (value.origin !== sub.origin || value.destination !== sub.destination) {
                       patch.origin = value.origin;
                       patch.destination = value.destination;
@@ -268,7 +268,7 @@ export function SubscriptionsManager({
                       () =>
                         update.mutateAsync({
                           id: sub.id,
-                          patch: { alerts_paused: true, if_updated_at: sub.updated_at },
+                          patch: { alerts_paused: true, if_version: sub.version },
                         }),
                       `已暫停「${label}」`,
                     )
@@ -279,7 +279,7 @@ export function SubscriptionsManager({
                       () =>
                         update.mutateAsync({
                           id: sub.id,
-                          patch: { alerts_paused: false, if_updated_at: sub.updated_at },
+                          patch: { alerts_paused: false, if_version: sub.version },
                         }),
                       `已恢復追蹤「${label}」`,
                     )
@@ -287,7 +287,7 @@ export function SubscriptionsManager({
                   onDelete={() =>
                     void run(
                       sub.id,
-                      () => remove.mutateAsync({ id: sub.id, ifUpdatedAt: sub.updated_at }),
+                      () => remove.mutateAsync({ id: sub.id, ifVersion: sub.version }),
                       `已刪除「${label}」`,
                     )
                   }
