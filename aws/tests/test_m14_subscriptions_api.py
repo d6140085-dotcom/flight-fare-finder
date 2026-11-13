@@ -983,12 +983,26 @@ class TransactionShapeTests(LocalDynamoTestCase):
             [("Put", self.subs_table, "attribute_not_exists(email)"),
              ("Update", self.quota_table, "attribute_not_exists(email)")],
             [("Put", self.subs_table, "attribute_not_exists(email)"), ("Update", self.quota_table, "#v = :v")],
-            [("Delete", self.subs_table, "attribute_exists(email)"), ("Update", self.quota_table, "#v = :v")],
+            # bound to the version the request read (ABA guard, 2026-11-13)
+            [("Delete", self.subs_table, "attribute_exists(email) AND updated_at = :u"), ("Update", self.quota_table, "#v = :v")],
             [("Put", self.subs_table, "attribute_not_exists(email)"), ("Update", self.quota_table, "#v = :v")],
         ])
         for c in self.calls:
             self.assert_well_formed(c)
         self.assertEqual(self.quota(), {**self.quota(), "count": 3, "version": 4})  # TYO deleted; SEL, LON, PAR
+        self.assert_invariants()
+
+    def test_delete_of_a_row_without_updated_at_is_bound_to_that_row(self):
+        """M1 rows may lack updated_at: the delete then requires attribute_not_exists(updated_at),
+        so it still can only remove the row it read, never a newer one at the same key."""
+        self.seed(USER, "TPE-TYO", plan_name="tokyo")
+        self.client.update_item(TableName=self.subs_table, Key=store_mod.to_item({"email": USER, "route": "TPE-TYO"}),
+                                UpdateExpression="REMOVE updated_at")
+        self.calls.clear()
+        self.delete("TPE-TYO")
+        self.assertEqual(self.kinds(self.calls[0])[0],
+                         ("Delete", self.subs_table, "attribute_exists(email) AND attribute_not_exists(updated_at)"))
+        self.assertEqual(self.raw(), {})
         self.assert_invariants()
 
     def test_route_and_month_changes_are_one_transaction_without_the_quota(self):

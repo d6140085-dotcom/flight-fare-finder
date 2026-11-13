@@ -125,6 +125,11 @@ class Service:
     # ---- DELETE /subscriptions/{id} ----------------------------------------------------
     def delete(self, email, sub_id, if_updated_at=None):
         route = v.id_param(sub_id)  # the sort key; always within the caller's own partition
+        # The version this request deletes: the client's if_updated_at, else the version of the
+        # row it reads first. Every attempt is bound to it, so a retry can never delete a
+        # different subscription that was moved into the same ID meanwhile (ABA) or a newer
+        # state of the row than the one the request saw (409 conflict, like PATCH).
+        expected, bound = if_updated_at, if_updated_at is not None
         for attempt in range(MAX_ATTEMPTS):
             self._backoff(attempt)
             quota = self.store.get_quota(email)
@@ -132,11 +137,13 @@ class Service:
             row = next((r for r in rows if r["route"] == route), None)
             if row is None:
                 raise ApiError(404, "not_found")
-            if if_updated_at is not None and row.get("updated_at") != if_updated_at:
+            if not bound:
+                expected, bound = row.get("updated_at"), True
+            if row.get("updated_at") != expected:
                 raise ApiError(409, "conflict")
             stamp = self._stamp()
             try:
-                self.store.delete(email, route, quota, len(rows) - 1, stamp, if_updated_at)
+                self.store.delete(email, route, quota, len(rows) - 1, stamp, expected)
                 return 204, None
             except TxCancelled as e:
                 if e.failed(0):

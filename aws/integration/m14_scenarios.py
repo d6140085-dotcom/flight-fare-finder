@@ -658,16 +658,21 @@ def s18_concurrent_month_changes(ctx):
 
 
 def s19_edits_and_deletes_of_sibling_months(ctx):
-    """KHH-TYO 2027-01..03 + 7 other routes (10 rows). 60 simultaneous requests: deletes of
-    2027-01, target/pause edits of 2027-02, month changes of 2027-03 onto 2027-01 (racing its
-    delete), and creates of more months. Deletes free slots one by one; no record is lost or
+    """KHH-TYO 2027-01 (A), 02, 03 (B) + 7 other routes (10 rows). 60 simultaneous requests:
+    15 deletes of A carrying A's version (as the page sends it), target/pause edits of 2027-02,
+    15 moves of B onto 2027-01 (racing A's delete: possible only once A is gone, so B then
+    reuses A's ID), and creates of more months. A delete aimed at A must never remove B
+    (subscription ID reuse / ABA, Stage B 2026-11-13): at most one delete succeeds and it is
+    A's; a moved B survives at A's ID with a new version and its provenance; no record lost or
     duplicated."""
     chk, u, svc = Check("s19_edits_and_deletes_of_sibling_months"), ctx.user("s19"), ctx.service()
     for m in ("2027-01", "2027-02", "2027-03"):
         svc.create(u, create_body("TYO", month=m, origin="KHH"))
     for d in DESTS[:7]:
         svc.create(u, create_body(d))
-    deletes = [lambda: svc.delete(u, fid("TYO", "2027-01", "KHH")) for _ in range(15)]
+    key_a, key_b = fkey("TYO", "2027-01", "KHH"), fkey("TYO", "2027-03", "KHH")
+    v_a = ctx.rows(u)[key_a]["updated_at"]
+    deletes = [lambda: svc.delete(u, fid("TYO", "2027-01", "KHH"), v_a) for _ in range(15)]
     edits = [lambda i=i: svc.patch(u, fid("TYO", "2027-02", "KHH"),
                                    [{"target_price": 4000 + i}, {"alerts_paused": True}, {"alerts_paused": False}][i % 3])
              for i in range(15)]
@@ -675,16 +680,29 @@ def s19_edits_and_deletes_of_sibling_months(ctx):
     creates = [lambda i=i: svc.create(u, create_body("TYO", month=MONTHS[4 + i % 6], origin="KHH")) for i in range(15)]
     res = parallel(deletes + edits + moves + creates)
     chk.responses(res)
-    chk.that(sum(s == 204 for s, _ in res[:15]) <= 1, "the same row was deleted twice")
-    chk.that(sum(s == 200 for s, _ in res[30:45]) <= 1, "2027-03 moved twice")
+    deleted = sum(s == 204 for s, _ in res[:15])
+    moved = sum(s == 200 for s, _ in res[30:45])
+    created = sum(s == 201 for s, _ in res[45:])
+    chk.that(all(s in (204, 404, 409) for s, _ in res[:15]), "delete: unexpected status")
+    chk.that(deleted <= 1, "A was deleted twice, or a delete aimed at A removed another subscription")
+    chk.that(moved <= 1, "2027-03 moved twice")
+    chk.that(moved <= deleted, "B moved into A's ID while A still existed")
     chk.that(all(s in (200, 404, 409) for s, _ in res[15:45]), "edit/move: unexpected status")
     chk.that(all(s in (201, 409) for s, _ in res[45:]), "create: unexpected status")
-    deleted = sum(s == 204 for s, _ in res[:15])
-    created = sum(s == 201 for s, _ in res[45:])
     chk.that(created <= deleted, "more creates than freed slots")
     rows, q = chk.invariants(ctx, u, expect_rows=10 - deleted + created)
+    at_a = rows.get(key_a)
+    if moved:      # B lives at A's ID: a different subscription, with a new version and provenance
+        chk.that(at_a is not None and at_a.get("previous_route") == key_b and at_a.get("updated_at") != v_a,
+                 "the subscription moved into A's ID was lost or is indistinguishable from A")
+        chk.that(key_b not in rows, "partial move: B still at 2027-03")
+    elif deleted:  # A gone, B untouched at 2027-03
+        chk.that(at_a is None and key_b in rows, "after A's delete: wrong rows at 2027-01/2027-03")
+    else:          # nothing deleted, so nothing could move in
+        chk.that(at_a is not None and at_a.get("updated_at") == v_a and key_b in rows, "A or B changed without a 2xx")
     chk.that(fkey("TYO", "2027-02", "KHH") in rows, "the edited sibling month disappeared")
     chk.that(q["version"] == 10 + deleted + created, f"I3 version {q['version']}")
+    chk.metrics.update(deleted=deleted, moved=moved, created=created)
     return chk.result()
 
 

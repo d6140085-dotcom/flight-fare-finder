@@ -169,10 +169,12 @@ class Store:
             self._quota_update(email, quota, new_count, now),
         ])
 
-    def delete(self, email, route, quota, new_count, now, if_updated_at=None):
-        cond, vals = "attribute_exists(email)", None
+    def delete(self, email, route, quota, new_count, now, if_updated_at):
+        """Quota-checked delete of exactly the row version ``if_updated_at`` (None: a row stored
+        without updated_at, e.g. an M1 row) — never whatever happens to be at the key."""
+        cond, vals = "attribute_exists(email) AND attribute_not_exists(updated_at)", None
         if if_updated_at is not None:
-            cond, vals = cond + " AND updated_at = :u", _vals(u=if_updated_at)
+            cond, vals = "attribute_exists(email) AND updated_at = :u", _vals(u=if_updated_at)
         op = {"TableName": self.subs, "Key": to_item({"email": email, "route": route}), "ConditionExpression": cond}
         if vals:
             op["ExpressionAttributeValues"] = vals

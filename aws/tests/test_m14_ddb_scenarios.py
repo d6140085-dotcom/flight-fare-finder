@@ -112,6 +112,76 @@ class B4Scenarios(unittest.TestCase):
         self.assertFalse(any(f.startswith("I1") or f.startswith("I2") or f.startswith("I4") for f in result["failures"]),
                          "integrity must still hold: the rejected writes wrote nothing")
 
+    # ---- s19 / Stage B regression: subscription ID reuse (ABA) -----------------------------------
+    def aba_setup(self):
+        """KHH-TYO 2027-01 (A), 2027-03 (B) and one sibling route, all created at the fixed clock."""
+        ctx = self.fresh_ctx()
+        u, svc = ctx.user("aba"), ctx.service(sleep=lambda s: None)
+        for m in ("2027-01", "2027-03"):
+            svc.create(u, sc.create_body("TYO", month=m, origin="KHH"))
+        svc.create(u, sc.create_body("SEL"))
+        a = ctx.rows(u)[sc.fkey("TYO", "2027-01", "KHH")]
+        return ctx, u, svc, a
+
+    def assert_consistent(self, ctx, u, rows_expected):
+        chk = sc.Check("aba")
+        rows, q = chk.invariants(ctx, u, expect_rows=rows_expected)
+        result = chk.result()
+        self.assertTrue(result["passed"], result["failures"])  # I1-I7
+        return rows, q
+
+    def test_stale_delete_never_deletes_a_row_moved_into_the_same_id(self):
+        """The exact Stage B s19 ordering: delete A, move B into A's ID, then a DELETE that still
+        carries A's version (what the page sends) arrives. It must be refused; a fresh DELETE with
+        B's version then succeeds. Quota and invariants exact at every step."""
+        ctx, u, svc, a = self.aba_setup()
+        a_id, b_id, v_a = sc.fid("TYO", "2027-01", "KHH"), sc.fid("TYO", "2027-03", "KHH"), a["updated_at"]
+        self.assertEqual(svc.delete(u, a_id, v_a), (204, None))                      # 1. A deleted
+        self.assert_consistent(ctx, u, 2)
+        status, body = svc.patch(u, b_id, {"departure_month": "2027-01"})              # 2. B moves in
+        self.assertEqual((status, body["id"]), (200, a_id))
+        rows, q = self.assert_consistent(ctx, u, 2)
+        b = rows[sc.fkey("TYO", "2027-01", "KHH")]
+        self.assertNotEqual(b["updated_at"], v_a)
+        self.assertEqual(b["previous_route"], sc.fkey("TYO", "2027-03", "KHH"))
+        self.assertNotIn(sc.fkey("TYO", "2027-03", "KHH"), rows)                     # no partial move
+        before = (ctx.rows(u), ctx.quota(u))
+        with self.assertRaises(sc.ApiError) as e:                                      # 3. stale DELETE
+            svc.delete(u, a_id, v_a)
+        self.assertEqual((e.exception.status, e.exception.code), (409, "conflict"))
+        self.assertEqual((ctx.rows(u), ctx.quota(u)), before, "a refused delete wrote something")
+        self.assertEqual(svc.delete(u, a_id, b["updated_at"]), (204, None))            # 4. fresh DELETE
+        rows, q = self.assert_consistent(ctx, u, 1)
+        self.assertEqual((q["count"], q["version"]), (1, 5))  # 3 creates + 2 deletes; the move: none
+
+    def test_versionless_delete_never_switches_rows_between_attempts(self):
+        """A DELETE without if_updated_at reads A, then its transaction is cancelled because another
+        request deleted A (quota version moved) and B moved into the same ID before the retry. The
+        retry must not delete B: the request is bound to the row version it first read."""
+        ctx, u, svc, a = self.aba_setup()
+        a_id, b_id = sc.fid("TYO", "2027-01", "KHH"), sc.fid("TYO", "2027-03", "KHH")
+        other = ctx.service(sleep=lambda s: None)
+        real, calls = ctx.store.delete, {"n": 0}
+
+        def racing_delete(*args, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:   # the request under test, first attempt: others commit first
+                other.delete(u, a_id, a["updated_at"])
+                other.patch(u, b_id, {"departure_month": "2027-01"})
+                raise sc.store_mod.TxCancelled(["None", "ConditionalCheckFailed"])
+            return real(*args, **kw)
+
+        from unittest import mock
+        with mock.patch.object(ctx.store, "delete", side_effect=racing_delete):
+            with self.assertRaises(sc.ApiError) as e:
+                svc.delete(u, a_id)
+        self.assertEqual((e.exception.status, e.exception.code), (409, "conflict"))
+        rows, q = self.assert_consistent(ctx, u, 2)
+        moved = rows.get(sc.fkey("TYO", "2027-01", "KHH"))
+        self.assertIsNotNone(moved, "the request deleted a different subscription (B) on retry")
+        self.assertEqual(moved["previous_route"], sc.fkey("TYO", "2027-03", "KHH"))
+        self.assertEqual((q["count"], q["version"]), (2, 4))
+
     def test_parallel_records_unexpected_exceptions(self):
         def boom():
             raise RuntimeError("programming error")
