@@ -8,8 +8,14 @@ Creates only (all deleted with the stack; DeletionPolicy Delete everywhere):
     own log group only. Explicit Deny statements: every production DynamoDB table by name; any
     DynamoDB resource other than the two test tables; every other AWS service by name (SQS,
     Lambda, EventBridge, Scheduler, API Gateway, SSM, Secrets Manager, SES, SNS, IAM, STS, S3,
-    CloudFormation, KMS); any action outside DynamoDB and the two log-write actions; any log
-    resource other than its own group; any region other than ap-southeast-2
+    CloudFormation); any action outside DynamoDB, the two log-write actions and kms:Decrypt; any
+    log resource other than its own group; any region other than ap-southeast-2.
+    KMS (2026-11-13): Lambda's init worker decrypts the function's environment variables with the
+    execution role's own session (CloudTrail: invokedBy absent, no kms:ViaService) using the
+    AWS-managed key alias/aws/lambda and encryption context aws:lambda:FunctionArn = the function
+    ARN. The role may therefore call exactly kms:Decrypt, on exactly that key, with exactly that
+    context, and never through another AWS service; every other KMS action, key or context is
+    explicitly denied.
   * Lambda flight-m14-it-<run>-runner with a placeholder; the runner ZIP
     (aws/integration/package_runner.py) is loaded afterwards with UpdateFunctionCode
 No API Gateway, event source, schedule, queue, SSM, S3 or production resource is referenced.
@@ -26,7 +32,11 @@ PROD_TABLES = ["subscriptions", "subscription_quota", "notification_history"]
 DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem", "dynamodb:UpdateItem",
                "dynamodb:DeleteItem", "dynamodb:ConditionCheckItem", "dynamodb:DescribeTable"]
 DENIED_SERVICES = ["sqs:*", "lambda:*", "events:*", "scheduler:*", "apigateway:*", "execute-api:*", "ssm:*",
-                   "secretsmanager:*", "ses:*", "sns:*", "iam:*", "sts:*", "s3:*", "cloudformation:*", "kms:*"]
+                   "secretsmanager:*", "ses:*", "sns:*", "iam:*", "sts:*", "s3:*", "cloudformation:*"]
+# The account's AWS-managed Lambda key (alias/aws/lambda), verified 2026-11-13 with DescribeKey /
+# ListAliases (KeyManager AWS, Enabled). Checked again before every change set.
+LAMBDA_ENV_KEY = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/76477f4c-aaca-47e9-aadd-33b0f21fffb9"
+LAMBDA_SERVICE = f"lambda.{REGION}.amazonaws.com"
 PLACEHOLDER = "def handler(event, context):\n    raise RuntimeError('runner code not loaded')\n"
 
 
@@ -36,6 +46,30 @@ def names(run_id):
     p = f"flight-m14-it-{run_id}"
     return {"stack": p, "subs": f"{p}-subscriptions", "quota": f"{p}-quota", "fn": f"{p}-runner",
             "role": f"{p}-runner-role", "logs": f"/aws/lambda/{p}-runner"}
+
+
+def resolve(value, run_id):
+    """The template's IAM policy with CloudFormation references replaced by the ARNs they will
+    have (for the IAM policy simulator and the offline evaluation tests)."""
+    n = names(run_id)
+    arns = {"SubsTable": f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:table/{n['subs']}",
+            "QuotaTable": f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:table/{n['quota']}",
+            "RunnerLogs": f"arn:aws:logs:{REGION}:{ACCOUNT}:log-group:{n['logs']}:*"}
+    if isinstance(value, list):
+        return [resolve(v, run_id) for v in value]
+    if isinstance(value, dict):
+        if set(value) == {"Fn::GetAtt"}:
+            return arns[value["Fn::GetAtt"][0]]
+        if set(value) == {"Fn::Sub"}:
+            return re.sub(r"\$\{(\w+)\.Arn\}", lambda m: arns[m.group(1)], value["Fn::Sub"])
+        return {k: resolve(v, run_id) for k, v in value.items()}
+    return value
+
+
+def runner_policy(run_id):
+    """The runner role's inline policy, fully resolved."""
+    role = template(run_id)["Resources"]["RunnerRole"]["Properties"]
+    return resolve(role["Policies"][0]["PolicyDocument"], run_id)
 
 
 def template(run_id, expires="2026-11-30"):
@@ -49,11 +83,15 @@ def template(run_id, expires="2026-11-30"):
                        "KeySchema": [{"AttributeName": k, "KeyType": t} for k, t in zip(keys, ("HASH", "RANGE"))],
                        "Tags": tags}}
     prod_arns = [f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:table/{t}" for t in PROD_TABLES]
+    fn_arn = f"arn:aws:lambda:{REGION}:{ACCOUNT}:function:{n['fn']}"
+    env_context = {"kms:EncryptionContext:aws:lambda:FunctionArn": fn_arn}
     policy = {"Version": "2012-10-17", "Statement": [
         {"Sid": "TestTablesOnly", "Effect": "Allow", "Action": DDB_ACTIONS,
          "Resource": [{"Fn::GetAtt": ["SubsTable", "Arn"]}, {"Fn::GetAtt": ["QuotaTable", "Arn"]}]},
         {"Sid": "OwnLogsOnly", "Effect": "Allow", "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
          "Resource": {"Fn::Sub": "${RunnerLogs.Arn}"}},
+        {"Sid": "OwnEnvironmentDecryptOnly", "Effect": "Allow", "Action": "kms:Decrypt", "Resource": LAMBDA_ENV_KEY,
+         "Condition": {"StringEquals": env_context}},
         {"Sid": "NeverProduction", "Effect": "Deny", "Action": "dynamodb:*",
          "Resource": prod_arns + [a + "/*" for a in prod_arns]},
         {"Sid": "NoTableButTheTestTables", "Effect": "Deny", "Action": "dynamodb:*",
@@ -61,7 +99,15 @@ def template(run_id, expires="2026-11-30"):
                          {"Fn::GetAtt": ["QuotaTable", "Arn"]}, {"Fn::Sub": "${QuotaTable.Arn}/*"}]},
         {"Sid": "NoOtherServices", "Effect": "Deny", "Action": DENIED_SERVICES, "Resource": "*"},
         {"Sid": "NothingElseAtAll", "Effect": "Deny",
-         "NotAction": ["dynamodb:*", "logs:CreateLogStream", "logs:PutLogEvents"], "Resource": "*"},
+         "NotAction": ["dynamodb:*", "logs:CreateLogStream", "logs:PutLogEvents", "kms:Decrypt"], "Resource": "*"},
+        {"Sid": "KmsOnlyTheLambdaKey", "Effect": "Deny", "Action": "kms:Decrypt", "NotResource": LAMBDA_ENV_KEY},
+        {"Sid": "KmsOnlyThisFunctionsContext", "Effect": "Deny", "Action": "kms:Decrypt", "Resource": "*",
+         "Condition": {"StringNotEquals": env_context}},
+        {"Sid": "KmsNeverThroughOtherServices", "Effect": "Deny", "Action": "kms:Decrypt", "Resource": "*",
+         # Deny only when the request DID come through a service and it isn't Lambda. Not
+         # "...IfExists": an absent key makes IfExists true, which would deny Lambda's own init
+         # call (made without kms:ViaService).
+         "Condition": {"Null": {"kms:ViaService": "false"}, "StringNotEquals": {"kms:ViaService": LAMBDA_SERVICE}}},
         {"Sid": "NoOtherLogGroup", "Effect": "Deny", "Action": "logs:*",
          "NotResource": [{"Fn::GetAtt": ["RunnerLogs", "Arn"]}, {"Fn::Sub": "${RunnerLogs.Arn}:*"}]},
         {"Sid": "SydneyOnly", "Effect": "Deny", "Action": "*", "Resource": "*",

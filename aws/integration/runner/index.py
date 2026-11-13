@@ -51,10 +51,23 @@ def check_table_arns(client, subs, quota):
             raise RuntimeError(f"refusing table {arn!r}")
 
 
+def preflight_report(function_arn, subs, quota):
+    """Stage C preflight ({"preflight": true}): proves the runtime started, the environment
+    variables were decrypted (they were just read and validated) and a log line can be written —
+    with no AWS API call at all: no DynamoDB client, no scenario, no write."""
+    report = {"preflight": "ok", "function": function_arn, "account": ACCOUNT, "region": REGION,
+              "subs_table": subs, "quota_table": quota}
+    print(json.dumps(report))  # -> the function's own CloudWatch log group
+    return report
+
+
 def handler(event, context):
     subs, quota = os.environ.get("SUBS_TABLE"), os.environ.get("QUOTA_TABLE")
     check_tables(subs, quota)
-    check_environment(getattr(context, "invoked_function_arn", None), os.environ, subs, quota)
+    function_arn = getattr(context, "invoked_function_arn", None)
+    check_environment(function_arn, os.environ, subs, quota)
+    if (event or {}).get("preflight") is True:
+        return preflight_report(function_arn, subs, quota)
     client = boto3.client("dynamodb", region_name=REGION,
                           config=Config(max_pool_connections=128, retries={"mode": "standard", "max_attempts": 4}))
     check_table_arns(client, subs, quota)
