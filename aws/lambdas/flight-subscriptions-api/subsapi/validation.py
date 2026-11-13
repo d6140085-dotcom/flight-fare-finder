@@ -103,7 +103,7 @@ def patch_body(body):
     """Shape checks that don't need the stored row."""
     if not isinstance(body, dict):
         raise ApiError(400, "invalid_json")
-    unknown = sorted(set(body) - PATCH_FIELDS - IGNORED_FIELDS - {"if_updated_at"})
+    unknown = sorted(set(body) - PATCH_FIELDS - IGNORED_FIELDS - {"if_version"})
     if unknown:
         raise ApiError(400, "unknown_field", {"fields": unknown})
     if not PATCH_FIELDS & set(body):
@@ -112,6 +112,17 @@ def patch_body(body):
         raise ApiError(400, "route_change_incomplete")
     if "alerts_paused" in body and not isinstance(body["alerts_paused"], bool):
         raise ApiError(400, "invalid_alerts_paused")
-    if "if_updated_at" in body and not isinstance(body["if_updated_at"], str):
-        raise ApiError(400, "invalid_json")
+    if_version(body.get("if_version"))
     return body
+
+
+VERSION_RE = re.compile(r"^(?:[A-Za-z0-9_-]{22}|legacy-[0-9a-f]{32})$")
+
+
+def if_version(value):
+    """The client's expected row version (contract §4.5): required for PATCH and DELETE."""
+    if value is None:
+        raise ApiError(428, "version_required")
+    if not isinstance(value, str) or not VERSION_RE.match(value):
+        raise ApiError(400, "invalid_version")
+    return value

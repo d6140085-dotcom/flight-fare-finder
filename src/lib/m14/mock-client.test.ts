@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiError, apiErrorMessage, parseFareCheck } from "./api";
+import { ApiError, apiErrorMessage, parseFareCheck, type PatchRequest } from "./api";
 import { MockSubscriptionsClient, seedRows } from "./mock-client";
 import { ORIGINS, DESTINATIONS } from "./catalog";
 
@@ -8,6 +8,23 @@ import { ORIGINS, DESTINATIONS } from "./catalog";
 const NOW = new Date("2026-11-11T02:00:00Z");
 const mock = (scenario: "demo" | "empty" | "full" | "multi_month" = "demo") =>
   new MockSubscriptionsClient({ now: () => NOW, scenario });
+
+type Mock = ReturnType<typeof mock>;
+type Edit = Omit<PatchRequest, "if_version">;
+
+/** The row's current version, as an up-to-date page holds it ("Z"×22 when the ID has no row). */
+async function versionOf(c: Mock, id: string): Promise<string> {
+  const row = (await c.list()).subscriptions.find((s) => s.id === id);
+  return row?.version ?? "Z".repeat(22);
+}
+
+/** PATCH / DELETE as the page sends them: with the current `if_version`. */
+async function upd(c: Mock, id: string, patch: Edit) {
+  return c.update(id, { ...patch, if_version: await versionOf(c, id) });
+}
+async function rm(c: Mock, id: string) {
+  return c.remove(id, await versionOf(c, id));
+}
 
 async function code(p: Promise<unknown>) {
   try {
@@ -98,20 +115,20 @@ describe("mock subscriptions API (contract docs/api/m1.4-subscriptions-api.md)",
     }
     expect(ids).toEqual(["KHH-TYO_2027-01", "KHH-TYO_2027-02", "KHH-TYO_2027-03"]);
     expect((await c.list()).limits.used).toBe(3);
-    await c.update("KHH-TYO_2027-02", { alerts_paused: true });
-    await c.remove("KHH-TYO_2027-01");
+    await upd(c, "KHH-TYO_2027-02", { alerts_paused: true });
+    await rm(c, "KHH-TYO_2027-01");
     const left = (await c.list()).subscriptions.map((s) => [s.id, s.status]);
     expect(left).toEqual([
       ["KHH-TYO_2027-02", "paused"],
       ["KHH-TYO_2027-03", "active"],
     ]);
     // Moving a month onto a sibling month is a duplicate; onto a free month it moves the ID.
-    expect(await code(c.update("KHH-TYO_2027-03", { departure_month: "2027-02" }))).toBe(
+    expect(await code(upd(c, "KHH-TYO_2027-03", { departure_month: "2027-02" }))).toBe(
       "duplicate_subscription",
     );
-    const moved = await c.update("KHH-TYO_2027-03", { departure_month: "2027-05" });
+    const moved = await upd(c, "KHH-TYO_2027-03", { departure_month: "2027-05" });
     expect(moved.id).toBe("KHH-TYO_2027-05");
-    expect(await code(c.update("KHH-TYO_2027-03", { target_price: 1 }))).toBe("not_found");
+    expect(await code(upd(c, "KHH-TYO_2027-03", { target_price: 1 }))).toBe("not_found");
   });
 
   it("keeps the rolling row beside a fixed row of the same month", async () => {
@@ -127,7 +144,7 @@ describe("mock subscriptions API (contract docs/api/m1.4-subscriptions-api.md)",
     // Both resolve to the same route/month fare check.
     const tyo = subs.filter((s) => s.route === "TPE-TYO").map((s) => s.fare_check?.kind);
     expect(tyo).toEqual(["ok", "ok"]);
-    expect(await code(c.update("TPE-TYO", { departure_month: "2026-12" }))).toBe(
+    expect(await code(upd(c, "TPE-TYO", { departure_month: "2026-12" }))).toBe(
       "duplicate_subscription",
     );
   });
@@ -142,21 +159,21 @@ describe("mock subscriptions API (contract docs/api/m1.4-subscriptions-api.md)",
       target_price: 3000,
     };
     expect(await code(c.create(req))).toBe("limit_reached");
-    await c.update("TPE-TYO_2026-12", { alerts_paused: true });
+    await upd(c, "TPE-TYO_2026-12", { alerts_paused: true });
     expect(await code(c.create(req))).toBe("limit_reached");
     expect(await code(c.create({ ...req, origin: "TPE", destination: "TYO" }))).toBe(
       "limit_reached", // another month of an existing route counts as a new record
     );
-    await c.remove("TPE-TYO_2026-12");
+    await rm(c, "TPE-TYO_2026-12");
     await c.create(req);
     expect((await c.list()).limits.used).toBe(10);
   });
 
   it("keeps a legacy rolling row rolling unless a month is chosen, then never back (§3.2)", async () => {
     const c = mock();
-    const kept = await c.update("TPE-TYO", { target_price: 8500 });
+    const kept = await upd(c, "TPE-TYO", { target_price: 8500 });
     expect(kept).toMatchObject({ month_mode: "rolling", target_price: 8500, plan_name: "tokyo" });
-    const fixed = await c.update("TPE-TYO", { departure_month: "2027-03" });
+    const fixed = await upd(c, "TPE-TYO", { departure_month: "2027-03" });
     expect(fixed).toMatchObject({
       id: "TPE-TYO_2027-03",
       month_mode: "fixed",
@@ -164,29 +181,27 @@ describe("mock subscriptions API (contract docs/api/m1.4-subscriptions-api.md)",
       plan_name: null,
     });
     expect(fixed.fare_check).toBeNull(); // a new month starts unchecked
-    expect(await code(c.update("TPE-TYO_2027-03", { departure_month: null }))).toBe(
+    expect(await code(upd(c, "TPE-TYO_2027-03", { departure_month: null }))).toBe(
       "invalid_departure_month",
     );
-    expect(await code(c.update("TPE-TYO", { target_price: 1 }))).toBe("not_found");
+    expect(await code(upd(c, "TPE-TYO", { target_price: 1 }))).toBe("not_found");
   });
 
   it("reactivates an expired row by choosing a month in the window (§3.3)", async () => {
     const c = mock();
-    expect(await code(c.update("RMQ-SEL_2026-10", { departure_month: "2026-10" }))).toBe(
-      "no-error",
-    );
-    const row = await c.update("RMQ-SEL_2026-10", { departure_month: "2027-02" });
+    expect(await code(upd(c, "RMQ-SEL_2026-10", { departure_month: "2026-10" }))).toBe("no-error");
+    const row = await upd(c, "RMQ-SEL_2026-10", { departure_month: "2027-02" });
     expect([row.id, row.status]).toEqual(["RMQ-SEL_2027-02", "active"]);
   });
 
   it("changes a route atomically and rejects a change onto an existing route (§6)", async () => {
     const c = mock();
     const lon = "TPE-LON_2027-02";
-    expect(await code(c.update(lon, { origin: "TPE" }))).toBe("route_change_incomplete");
+    expect(await code(upd(c, lon, { origin: "TPE" }))).toBe("route_change_incomplete");
     expect(
-      await code(c.update(lon, { origin: "TPE", destination: "SYD", departure_month: "2026-12" })),
+      await code(upd(c, lon, { origin: "TPE", destination: "SYD", departure_month: "2026-12" })),
     ).toBe("duplicate_subscription");
-    const moved = await c.update(lon, { origin: "TPE", destination: "PAR" });
+    const moved = await upd(c, lon, { origin: "TPE", destination: "PAR" });
     expect([moved.id, moved.route]).toEqual(["TPE-PAR_2027-02", "TPE-PAR"]);
     const routes = (await c.list()).subscriptions.map((s) => s.route);
     expect(routes).toContain("TPE-PAR");
@@ -194,20 +209,53 @@ describe("mock subscriptions API (contract docs/api/m1.4-subscriptions-api.md)",
     expect((await c.list()).limits.used).toBe(6);
   });
 
-  it("detects concurrent changes with if_updated_at and reports missing rows (§4.3, §4.4)", async () => {
+  it("detects concurrent changes with the row version and reports missing rows (§4.3–§4.5)", async () => {
     const c = mock();
-    const before = (await c.list()).subscriptions.find((s) => s.route === "TPE-SYD");
     const syd = "TPE-SYD_2026-12";
-    c.touch(syd);
-    expect(
-      await code(c.update(syd, { target_price: 1, if_updated_at: before?.updated_at ?? "" })),
-    ).toBe("conflict");
-    expect(await code(c.remove(syd, before?.updated_at))).toBe("conflict");
-    expect(await code(c.remove("TPE-ZZZ"))).toBe("not_found");
+    const before = await versionOf(c, syd);
+    c.touch(syd); // another tab changed the row
+    expect(await versionOf(c, syd)).not.toBe(before);
+    expect(await code(c.update(syd, { target_price: 1, if_version: before }))).toBe("conflict");
+    expect(await code(c.remove(syd, before))).toBe("conflict");
+    expect(await code(rm(c, "TPE-ZZZ"))).toBe("not_found");
     for (const bad of ["bad", "TPE-SYD#2026-12", "TPE-SYD%232026-12", "TPE-SYD_2026-1"]) {
-      expect(await code(c.remove(bad))).toBe("invalid_route");
+      expect(await code(rm(c, bad))).toBe("invalid_route");
     }
-    expect(await code(c.update(syd, {}))).toBe("empty_patch");
+    expect(await code(upd(c, syd, {}))).toBe("empty_patch");
+  });
+
+  it("requires a version on every change and never falls back to the current one (§4.5)", async () => {
+    const c = mock();
+    const syd = "TPE-SYD_2026-12";
+    const missing = await c
+      .update(syd, { target_price: 1 } as unknown as PatchRequest)
+      .catch((e: unknown) => e);
+    expect(missing).toBeInstanceOf(ApiError);
+    expect([(missing as ApiError).code, (missing as ApiError).status]).toEqual([
+      "version_required",
+      428,
+    ]);
+    expect(await code(c.remove(syd, undefined as unknown as string))).toBe("version_required");
+    expect(await code(c.remove(syd, "short"))).toBe("invalid_version");
+    const v = await versionOf(c, syd);
+    const edited = await c.update(syd, { target_price: 5000, if_version: v });
+    expect(edited.version).not.toBe(v); // every successful change returns a new version
+    expect(await code(c.update(syd, { target_price: 6000, if_version: v }))).toBe("conflict");
+    expect(edited.version).toMatch(/^[A-Za-z0-9_-]{22}$/);
+  });
+
+  it("never lets a stale delete remove another subscription that reused the ID (ABA)", async () => {
+    const c = mock("multi_month");
+    const a = "KHH-TYO_2027-01";
+    const vA = await versionOf(c, a);
+    await c.remove(a, vA); // A deleted
+    const b = await upd(c, "KHH-TYO_2027-03", { departure_month: "2027-01" }); // B moves into A's ID
+    expect(b.id).toBe(a);
+    expect(b.version).not.toBe(vA);
+    expect(await code(c.remove(a, vA))).toBe("conflict"); // stale DELETE for A
+    expect((await c.list()).subscriptions.some((s) => s.id === a)).toBe(true); // B intact
+    await c.remove(a, b.version); // a fresh DELETE with B's version
+    expect((await c.list()).subscriptions.some((s) => s.id === a)).toBe(false);
   });
 
   it("simulates list failures without touching the network", async () => {

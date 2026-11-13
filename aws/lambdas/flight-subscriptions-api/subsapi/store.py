@@ -6,8 +6,15 @@ Tables (names from the environment):
                       "ORIG-DEST" (legacy rolling) or "ORIG-DEST#YYYY-MM" (fixed month, R-MM-1);
                       see subkeys.py
   subscription_quota  PK email; count, version — new in M1.4 (contract §5.1)
+
+Row identity (2026-11-13): every row written by M1.4 carries ``version_token``, a random opaque
+token that changes on every mutation. Writes to an existing row are guarded by ``guard(row)``:
+the stored item must still be exactly the row that was read (token, plus updated_at so a write
+by the still-live M1 save Lambda, which never touches the token, is detected). M1 rows without a
+token are guarded by every stored attribute (contract §4.5).
 """
 import json
+import re
 import uuid
 from decimal import Decimal
 
@@ -86,6 +93,61 @@ def json_key(key):
 
 def _vals(**kw):
     return {f":{k}": _ser.serialize(v) for k, v in kw.items()}
+
+
+TOKEN_ATTR = "version_token"
+_M14_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+
+
+def token_current(row):
+    """True when the row's version_token describes its current content: M1.4 wrote it last.
+    Every M1.4 write sets a new token and a millisecond "...Z" updated_at; the deployed M1 save
+    Lambda writes second-precision "+00:00" stamps and never touches the token, so a row it
+    changed (or created) is treated as legacy until M1.4 writes it again."""
+    return bool(row.get(TOKEN_ATTR)) and bool(_M14_STAMP.match(str(row.get("updated_at") or "")))
+
+
+def _dyn(value):
+    """A read value back in DynamoDB form (floats as exact Decimals)."""
+    if isinstance(value, float):
+        value = Decimal(repr(value))
+    elif isinstance(value, dict):
+        return {"M": {k: _dyn(v) for k, v in value.items()}}
+    elif isinstance(value, list):
+        return {"L": [_dyn(v) for v in value]}
+    return _ser.serialize(value)
+
+
+def guard(row):
+    """(condition, names, values): the stored item at the row's key is still exactly ``row``.
+
+    Token-current row: version_token and updated_at unchanged. Any other row (M1 row without a
+    token, or a token row the M1 Lambda changed since): every attribute that was read is unchanged
+    and, without a token, none has been added (contract §4.5). Names/values use a ``g`` prefix so
+    they can be combined with an update's own placeholders."""
+    names, values = {"#gtok": TOKEN_ATTR, "#gupd": "updated_at"}, {}
+    parts = ["attribute_exists(email)"]
+    if token_current(row):
+        parts.append("#gtok = :gtok")
+        values[":gtok"] = _ser.serialize(row[TOKEN_ATTR])
+        if row.get("updated_at") is None:
+            parts.append("attribute_not_exists(#gupd)")
+        else:
+            parts.append("#gupd = :gupd")
+            values[":gupd"] = _ser.serialize(row["updated_at"])
+        return " AND ".join(parts), names, values
+    del names["#gupd"]
+    if not row.get(TOKEN_ATTR):
+        parts.append("attribute_not_exists(#gtok)")
+    else:
+        del names["#gtok"]  # a token row last written by M1: the token is compared below like any attribute
+    for i, (k, v) in enumerate(sorted(row.items())):
+        if k in ("email", "route") or v is None:
+            continue
+        names[f"#ga{i}"] = k
+        values[f":ga{i}"] = _dyn(v)
+        parts.append(f"#ga{i} = :ga{i}")
+    return " AND ".join(parts), names, values
 
 
 class Store:
@@ -169,29 +231,34 @@ class Store:
             self._quota_update(email, quota, new_count, now),
         ])
 
-    def delete(self, email, route, quota, new_count, now, if_updated_at=None):
-        cond, vals = "attribute_exists(email)", None
-        if if_updated_at is not None:
-            cond, vals = cond + " AND updated_at = :u", _vals(u=if_updated_at)
-        op = {"TableName": self.subs, "Key": to_item({"email": email, "route": route}), "ConditionExpression": cond}
-        if vals:
-            op["ExpressionAttributeValues"] = vals
-        self._transact([{"Delete": op}, self._quota_update(email, quota, new_count, now)])
+    def _guarded_delete(self, email, row):
+        cond, names, values = guard(row)
+        op = {"TableName": self.subs, "Key": to_item({"email": email, "route": row["route"]}),
+              "ConditionExpression": cond, "ExpressionAttributeNames": names}
+        if values:
+            op["ExpressionAttributeValues"] = values
+        return {"Delete": op}
 
-    def change_route(self, email, old_route, expected_updated_at, new_row):
-        """Delete old + Put new in one transaction; the record count is unchanged (§6). Used for
-        every sort-key change: route changes and, since R-MM-1, month changes."""
+    def delete(self, email, row, quota, new_count, now):
+        """Quota-checked delete of exactly ``row`` as read (guard) — never whatever happens to be
+        at the key."""
+        self._transact([self._guarded_delete(email, row), self._quota_update(email, quota, new_count, now)])
+
+    def change_route(self, email, old_row, new_row):
+        """Delete old (exactly as read) + Put new in one transaction; the record count is
+        unchanged (§6). Used for every sort-key change: route changes and, since R-MM-1, month
+        changes."""
         self._transact([
-            {"Delete": {"TableName": self.subs, "Key": to_item({"email": email, "route": old_route}),
-                        "ConditionExpression": "attribute_exists(email) AND updated_at = :u",
-                        "ExpressionAttributeValues": _vals(u=expected_updated_at)}},
+            self._guarded_delete(email, old_row),
             {"Put": {"TableName": self.subs, "Item": to_item({**new_row, "email": email}),
                      "ConditionExpression": "attribute_not_exists(email)"}},
         ])
 
-    def update(self, email, route, set_fields, remove_fields, expected_updated_at=None):
-        """UpdateItem on an existing row; with ``expected_updated_at``, only if unchanged."""
-        names, values, sets = {}, {}, []
+    def update(self, email, row, set_fields, remove_fields):
+        """UpdateItem on ``row``'s key, only if the stored item is still exactly ``row`` (guard)."""
+        route = row["route"]
+        cond, names, values = guard(row)
+        sets = []
         for i, (k, v) in enumerate(sorted(set_fields.items())):
             names[f"#s{i}"] = k
             values[f":s{i}"] = _ser.serialize(v)
@@ -203,10 +270,6 @@ class Store:
         expr = "SET " + ", ".join(sets)
         if removes:
             expr += " REMOVE " + ", ".join(removes)
-        cond = "attribute_exists(email)"
-        if expected_updated_at is not None:
-            cond += " AND updated_at = :expected"
-            values[":expected"] = _ser.serialize(expected_updated_at)
         try:
             r = self.c.update_item(
                 TableName=self.subs, Key=to_item({"email": email, "route": route}),

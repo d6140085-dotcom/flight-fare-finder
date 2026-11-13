@@ -94,7 +94,7 @@ def handler(event, context):
         elif key in ("PATCH /subscriptions/{id}", "PATCH /subscriptions/{route}"):
             status, body = svc.patch(email, params.get("id", params.get("route")), _body(event))
         elif key in ("DELETE /subscriptions/{id}", "DELETE /subscriptions/{route}"):
-            status, body = svc.delete(email, params.get("id", params.get("route")), query.get("if_updated_at"))
+            status, body = svc.delete(email, params.get("id", params.get("route")), query.get("if_version"))
         elif key == "POST /subscribe":
             status, body = svc.legacy_subscribe(email, _body(event))
         else:

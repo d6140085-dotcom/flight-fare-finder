@@ -15,6 +15,9 @@ export interface SubscriptionDto extends RouteSubscription {
   status: Status;
   /** §3.4: latest fare check for (origin, destination, effective_month); null = not checked yet. */
   fare_check: FareCheck | null;
+  /** §4.5: opaque row version. Send it back as `if_version` on PATCH/DELETE; every successful
+   * change returns a new one. Never derived from `updated_at` (which is informational only). */
+  version: string;
 }
 
 /** §4.1 GET /subscriptions. */
@@ -39,7 +42,8 @@ export interface PatchRequest {
   alerts_paused?: boolean;
   origin?: string;
   destination?: string;
-  if_updated_at?: string;
+  /** §4.5: required — the `version` of the row this edit is based on. */
+  if_version: string;
 }
 
 /** §9 error codes the page handles, plus client-side network failures. */
@@ -53,6 +57,8 @@ export type ApiErrorCode =
   | "invalid_alerts_paused"
   | "unauthorized"
   | "conflict"
+  | "version_required"
+  | "invalid_version"
   | "too_many_requests"
   | "internal_error"
   | "network_error";
@@ -75,7 +81,8 @@ export interface SubscriptionsClient {
   create(req: CreateRequest): Promise<SubscriptionDto>;
   /** `id`: the public subscription ID ("KHH-TYO" or "KHH-TYO_2027-01"), never the route pair. */
   update(id: string, patch: PatchRequest): Promise<SubscriptionDto>;
-  remove(id: string, ifUpdatedAt?: string): Promise<void>;
+  /** `ifVersion`: required — the `version` of the row being deleted (§4.5). */
+  remove(id: string, ifVersion: string): Promise<void>;
 }
 
 const SHARED: ReadonlySet<string> = new Set<ErrorCode>([
