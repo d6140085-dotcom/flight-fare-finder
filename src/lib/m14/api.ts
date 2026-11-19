@@ -1,7 +1,7 @@
 // M1.4 subscriptions API: wire types and the client interface the page talks to.
 // Contract: docs/api/m1.4-subscriptions-api.md (§3 resources, §4 endpoints, §9 error codes).
-// Phase 3A uses only MockSubscriptionsClient (mock-client.ts). Phase 3B adds an HTTP client that
-// implements the same interface against the deployed API; the page does not change.
+// Phase 3A uses only MockSubscriptionsClient (mock-client.ts). Phase 3B adds HttpSubscriptionsClient
+// (http-client.ts), which implements the same interface over HTTP; the page does not change.
 import type { FareCheck } from "./fare-status";
 import { errorMessage, type ErrorCode, type RouteSubscription, type Status } from "./subscriptions";
 
@@ -46,22 +46,49 @@ export interface PatchRequest {
   if_version: string;
 }
 
-/** §9 error codes the page handles, plus client-side network failures. */
+/** §9 error codes the API sends and the page handles. */
+export const SERVER_ERROR_CODES = [
+  "origin_required",
+  "destination_required",
+  "unsupported_origin",
+  "unsupported_destination",
+  "same_origin_destination",
+  "invalid_target_price",
+  "invalid_departure_month",
+  "duplicate_subscription",
+  "limit_reached",
+  "not_found",
+  "invalid_json",
+  "invalid_route",
+  "route_change_incomplete",
+  "empty_patch",
+  "unknown_field",
+  "invalid_alerts_paused",
+  "unauthorized",
+  "conflict",
+  "version_required",
+  "invalid_version",
+  "too_many_requests",
+  "internal_error",
+] as const;
+
+/**
+ * §9 error codes, plus codes only the HTTP client produces:
+ * - `network_error`: no HTTP response (offline, DNS, CORS, timeout). A write may or may not
+ *   have been applied.
+ * - `service_unavailable`: 502/503/504 from the gateway or service. A write may or may not
+ *   have been applied.
+ * - `bad_request`: a 4xx without a known code (e.g. an unknown route or plan).
+ * - `invalid_response`: a response that does not match the contract. After a successful write
+ *   status the change may have been saved.
+ */
 export type ApiErrorCode =
   | ErrorCode
-  | "invalid_json"
-  | "invalid_route"
-  | "route_change_incomplete"
-  | "empty_patch"
-  | "unknown_field"
-  | "invalid_alerts_paused"
-  | "unauthorized"
-  | "conflict"
-  | "version_required"
-  | "invalid_version"
-  | "too_many_requests"
-  | "internal_error"
-  | "network_error";
+  | (typeof SERVER_ERROR_CODES)[number]
+  | "network_error"
+  | "service_unavailable"
+  | "bad_request"
+  | "invalid_response";
 
 export class ApiError extends Error {
   constructor(
@@ -122,6 +149,12 @@ export function apiErrorMessage(
       return "無法連線到訂閱服務，請檢查網路後再試一次。";
     case "internal_error":
       return "訂閱服務暫時發生錯誤，沒有任何變更被儲存，請稍後再試。";
+    case "service_unavailable":
+      return "訂閱服務暫時無法使用，請稍後重新整理頁面確認最新狀態後再試。";
+    case "invalid_response":
+      return "訂閱服務回應異常，請重新整理頁面確認最新狀態。";
+    case "version_required":
+      return "這筆訂閱缺少版本資訊，請重新整理頁面後再試一次。";
     default:
       return "請求內容有誤，請重新整理頁面後再試一次。";
   }

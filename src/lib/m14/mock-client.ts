@@ -276,7 +276,7 @@ export class MockSubscriptionsClient implements SubscriptionsClient {
       (a, b) =>
         a.route.localeCompare(b.route) ||
         (a.departure_month ?? "").localeCompare(b.departure_month ?? "") ||
-        a.created_at.localeCompare(b.created_at),
+        (a.created_at ?? "").localeCompare(b.created_at ?? ""),
     );
     return {
       subscriptions: subs.map((r) => this.dto(r)),

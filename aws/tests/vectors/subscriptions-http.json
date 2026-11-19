@@ -1,0 +1,1389 @@
+{
+  "_doc": [
+    "Shared HTTP contract examples for the M1.4 subscriptions API (docs/api/m1.4-subscriptions-api.md).",
+    "Checked by aws/tests/test_m14_http_contract.py (replayed through the real handler on local DynamoDB)",
+    "and src/lib/m14/http-client.contract.test.ts (HttpSubscriptionsClient requests and results).",
+    "rows: stored items (the test adds the email). Test addresses only; no real data."
+  ],
+  "now": "2026-11-05T03:00:00Z",
+  "user": "user@example.com",
+  "other_user": "other@example.com",
+  "token": "test-access-token",
+  "base_url": "https://subscriptions-api.example.test",
+  "rows": {
+    "legacy_rolling_tokyo": {
+      "route": "TPE-TYO",
+      "origin": "TPE",
+      "destination": "TYO",
+      "plan_name": "tokyo",
+      "target_price": 9325,
+      "currency": "TWD",
+      "created_at": "2026-10-30T08:00:00+00:00",
+      "updated_at": "2026-10-30T08:00:00+00:00"
+    },
+    "legacy_rolling_no_timestamps": {
+      "route": "TPE-SEL",
+      "origin": "TPE",
+      "destination": "SEL",
+      "plan_name": "seoul",
+      "target_price": 5989,
+      "currency": "TWD"
+    },
+    "fixed_jan": {
+      "route": "TPE-OSA#2027-01",
+      "origin": "TPE",
+      "destination": "OSA",
+      "departure_month": "2027-01",
+      "target_price": 8000,
+      "currency": "TWD",
+      "alerts_paused": false,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "fixedJanVersion0000000"
+    },
+    "paused_feb": {
+      "route": "KHH-OKA#2027-02",
+      "origin": "KHH",
+      "destination": "OKA",
+      "departure_month": "2027-02",
+      "target_price": 4500,
+      "currency": "TWD",
+      "alerts_paused": true,
+      "created_at": "2026-11-02T02:00:00.000Z",
+      "updated_at": "2026-11-03T02:00:00.000Z",
+      "version_token": "pausedFebVersion000000"
+    },
+    "expired_oct": {
+      "route": "RMQ-SEL#2026-10",
+      "origin": "RMQ",
+      "destination": "SEL",
+      "departure_month": "2026-10",
+      "target_price": 6000,
+      "currency": "TWD",
+      "alerts_paused": false,
+      "created_at": "2026-09-20T02:00:00.000Z",
+      "updated_at": "2026-09-20T02:00:00.000Z",
+      "version_token": "expiredOctVersion00000"
+    },
+    "other_users_fixed": {
+      "route": "TPE-PAR#2027-01",
+      "origin": "TPE",
+      "destination": "PAR",
+      "departure_month": "2027-01",
+      "target_price": 20000,
+      "currency": "TWD",
+      "alerts_paused": false,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "otherUsersVersion00000"
+    },
+    "limit_01": {
+      "route": "TPE-BKK#2026-12",
+      "origin": "TPE",
+      "destination": "BKK",
+      "departure_month": "2026-12",
+      "target_price": 7000,
+      "currency": "TWD",
+      "alerts_paused": true,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "limitRow01000000000000"
+    },
+    "limit_02": {
+      "route": "TPE-BKK#2027-01",
+      "origin": "TPE",
+      "destination": "BKK",
+      "departure_month": "2027-01",
+      "target_price": 7100,
+      "currency": "TWD",
+      "alerts_paused": false,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "limitRow02000000000000"
+    },
+    "limit_03": {
+      "route": "TPE-BKK#2027-02",
+      "origin": "TPE",
+      "destination": "BKK",
+      "departure_month": "2027-02",
+      "target_price": 7200,
+      "currency": "TWD",
+      "alerts_paused": false,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "limitRow03000000000000"
+    },
+    "limit_04": {
+      "route": "TPE-BKK#2027-03",
+      "origin": "TPE",
+      "destination": "BKK",
+      "departure_month": "2027-03",
+      "target_price": 7300,
+      "currency": "TWD",
+      "alerts_paused": true,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "limitRow04000000000000"
+    },
+    "limit_05": {
+      "route": "TPE-BKK#2027-04",
+      "origin": "TPE",
+      "destination": "BKK",
+      "departure_month": "2027-04",
+      "target_price": 7400,
+      "currency": "TWD",
+      "alerts_paused": false,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "limitRow05000000000000"
+    },
+    "limit_06": {
+      "route": "TPE-BKK#2027-05",
+      "origin": "TPE",
+      "destination": "BKK",
+      "departure_month": "2027-05",
+      "target_price": 7500,
+      "currency": "TWD",
+      "alerts_paused": false,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "limitRow06000000000000"
+    },
+    "limit_07": {
+      "route": "TPE-BKK#2027-06",
+      "origin": "TPE",
+      "destination": "BKK",
+      "departure_month": "2027-06",
+      "target_price": 7600,
+      "currency": "TWD",
+      "alerts_paused": true,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "limitRow07000000000000"
+    },
+    "limit_08": {
+      "route": "TPE-BKK#2027-07",
+      "origin": "TPE",
+      "destination": "BKK",
+      "departure_month": "2027-07",
+      "target_price": 7700,
+      "currency": "TWD",
+      "alerts_paused": false,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "limitRow08000000000000"
+    },
+    "limit_09": {
+      "route": "TPE-BKK#2027-08",
+      "origin": "TPE",
+      "destination": "BKK",
+      "departure_month": "2027-08",
+      "target_price": 7800,
+      "currency": "TWD",
+      "alerts_paused": false,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "limitRow09000000000000"
+    },
+    "limit_10": {
+      "route": "TPE-BKK#2027-09",
+      "origin": "TPE",
+      "destination": "BKK",
+      "departure_month": "2027-09",
+      "target_price": 7900,
+      "currency": "TWD",
+      "alerts_paused": true,
+      "created_at": "2026-11-01T02:00:00.000Z",
+      "updated_at": "2026-11-01T02:00:00.000Z",
+      "version_token": "limitRow10000000000000"
+    }
+  },
+  "cases": [
+    {
+      "name": "list_mixed",
+      "description": "Fixed-month, paused and expired rows, a legacy rolling M1 row, and an M1 row without timestamps. Another user's row is never listed.",
+      "seed": [
+        "legacy_rolling_tokyo",
+        "legacy_rolling_no_timestamps",
+        "fixed_jan",
+        "paused_feb",
+        "expired_oct"
+      ],
+      "seed_other": [
+        "other_users_fixed"
+      ],
+      "new_tokens": [],
+      "client": {
+        "op": "list"
+      },
+      "http": {
+        "method": "GET",
+        "path": "/subscriptions",
+        "query": null,
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "subscriptions": [
+            {
+              "id": "KHH-OKA_2027-02",
+              "route": "KHH-OKA",
+              "origin": "KHH",
+              "destination": "OKA",
+              "origin_name": {
+                "zh": "高雄",
+                "en": "Kaohsiung"
+              },
+              "destination_name": {
+                "zh": "沖繩",
+                "en": "Okinawa"
+              },
+              "departure_month": "2027-02",
+              "month_mode": "fixed",
+              "effective_month": "2027-02",
+              "status": "paused",
+              "target_price": 4500,
+              "currency": "TWD",
+              "alerts_paused": true,
+              "plan_name": null,
+              "created_at": "2026-11-02T02:00:00.000Z",
+              "updated_at": "2026-11-03T02:00:00.000Z",
+              "version": "pausedFebVersion000000",
+              "fare_check": null
+            },
+            {
+              "id": "RMQ-SEL_2026-10",
+              "route": "RMQ-SEL",
+              "origin": "RMQ",
+              "destination": "SEL",
+              "origin_name": {
+                "zh": "台中",
+                "en": "Taichung"
+              },
+              "destination_name": {
+                "zh": "首爾",
+                "en": "Seoul"
+              },
+              "departure_month": "2026-10",
+              "month_mode": "fixed",
+              "effective_month": "2026-10",
+              "status": "expired",
+              "target_price": 6000,
+              "currency": "TWD",
+              "alerts_paused": false,
+              "plan_name": null,
+              "created_at": "2026-09-20T02:00:00.000Z",
+              "updated_at": "2026-09-20T02:00:00.000Z",
+              "version": "expiredOctVersion00000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-OSA_2027-01",
+              "route": "TPE-OSA",
+              "origin": "TPE",
+              "destination": "OSA",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "大阪",
+                "en": "Osaka"
+              },
+              "departure_month": "2027-01",
+              "month_mode": "fixed",
+              "effective_month": "2027-01",
+              "status": "active",
+              "target_price": 8000,
+              "currency": "TWD",
+              "alerts_paused": false,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "fixedJanVersion0000000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-SEL",
+              "route": "TPE-SEL",
+              "origin": "TPE",
+              "destination": "SEL",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "首爾",
+                "en": "Seoul"
+              },
+              "departure_month": null,
+              "month_mode": "rolling",
+              "effective_month": "2026-12",
+              "status": "active",
+              "target_price": 5989,
+              "currency": "TWD",
+              "alerts_paused": false,
+              "plan_name": "seoul",
+              "created_at": null,
+              "updated_at": null,
+              "version": "legacy-c26820e97955241d7e3f6aae4482727c",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-TYO",
+              "route": "TPE-TYO",
+              "origin": "TPE",
+              "destination": "TYO",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "東京",
+                "en": "Tokyo"
+              },
+              "departure_month": null,
+              "month_mode": "rolling",
+              "effective_month": "2026-12",
+              "status": "active",
+              "target_price": 9325,
+              "currency": "TWD",
+              "alerts_paused": false,
+              "plan_name": "tokyo",
+              "created_at": "2026-10-30T08:00:00+00:00",
+              "updated_at": "2026-10-30T08:00:00+00:00",
+              "version": "legacy-4d1c2f0216c0346b4dfda29c5c271256",
+              "fare_check": null
+            }
+          ],
+          "limits": {
+            "max": 10,
+            "used": 5
+          },
+          "months": {
+            "current": "2026-11",
+            "selectable": [
+              "2026-12",
+              "2027-01",
+              "2027-02",
+              "2027-03",
+              "2027-04",
+              "2027-05",
+              "2027-06",
+              "2027-07",
+              "2027-08",
+              "2027-09",
+              "2027-10",
+              "2027-11"
+            ]
+          }
+        }
+      },
+      "stored_keys_after": [
+        "KHH-OKA#2027-02",
+        "RMQ-SEL#2026-10",
+        "TPE-OSA#2027-01",
+        "TPE-SEL",
+        "TPE-TYO"
+      ]
+    },
+    {
+      "name": "list_at_limit",
+      "description": "Ten subscriptions (paused rows count): limits.used = limits.max = 10.",
+      "seed": [
+        "limit_01",
+        "limit_02",
+        "limit_03",
+        "limit_04",
+        "limit_05",
+        "limit_06",
+        "limit_07",
+        "limit_08",
+        "limit_09",
+        "limit_10"
+      ],
+      "new_tokens": [],
+      "client": {
+        "op": "list"
+      },
+      "http": {
+        "method": "GET",
+        "path": "/subscriptions",
+        "query": null,
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "subscriptions": [
+            {
+              "id": "TPE-BKK_2026-12",
+              "route": "TPE-BKK",
+              "origin": "TPE",
+              "destination": "BKK",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "曼谷",
+                "en": "Bangkok"
+              },
+              "departure_month": "2026-12",
+              "month_mode": "fixed",
+              "effective_month": "2026-12",
+              "status": "paused",
+              "target_price": 7000,
+              "currency": "TWD",
+              "alerts_paused": true,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "limitRow01000000000000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-BKK_2027-01",
+              "route": "TPE-BKK",
+              "origin": "TPE",
+              "destination": "BKK",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "曼谷",
+                "en": "Bangkok"
+              },
+              "departure_month": "2027-01",
+              "month_mode": "fixed",
+              "effective_month": "2027-01",
+              "status": "active",
+              "target_price": 7100,
+              "currency": "TWD",
+              "alerts_paused": false,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "limitRow02000000000000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-BKK_2027-02",
+              "route": "TPE-BKK",
+              "origin": "TPE",
+              "destination": "BKK",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "曼谷",
+                "en": "Bangkok"
+              },
+              "departure_month": "2027-02",
+              "month_mode": "fixed",
+              "effective_month": "2027-02",
+              "status": "active",
+              "target_price": 7200,
+              "currency": "TWD",
+              "alerts_paused": false,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "limitRow03000000000000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-BKK_2027-03",
+              "route": "TPE-BKK",
+              "origin": "TPE",
+              "destination": "BKK",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "曼谷",
+                "en": "Bangkok"
+              },
+              "departure_month": "2027-03",
+              "month_mode": "fixed",
+              "effective_month": "2027-03",
+              "status": "paused",
+              "target_price": 7300,
+              "currency": "TWD",
+              "alerts_paused": true,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "limitRow04000000000000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-BKK_2027-04",
+              "route": "TPE-BKK",
+              "origin": "TPE",
+              "destination": "BKK",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "曼谷",
+                "en": "Bangkok"
+              },
+              "departure_month": "2027-04",
+              "month_mode": "fixed",
+              "effective_month": "2027-04",
+              "status": "active",
+              "target_price": 7400,
+              "currency": "TWD",
+              "alerts_paused": false,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "limitRow05000000000000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-BKK_2027-05",
+              "route": "TPE-BKK",
+              "origin": "TPE",
+              "destination": "BKK",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "曼谷",
+                "en": "Bangkok"
+              },
+              "departure_month": "2027-05",
+              "month_mode": "fixed",
+              "effective_month": "2027-05",
+              "status": "active",
+              "target_price": 7500,
+              "currency": "TWD",
+              "alerts_paused": false,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "limitRow06000000000000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-BKK_2027-06",
+              "route": "TPE-BKK",
+              "origin": "TPE",
+              "destination": "BKK",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "曼谷",
+                "en": "Bangkok"
+              },
+              "departure_month": "2027-06",
+              "month_mode": "fixed",
+              "effective_month": "2027-06",
+              "status": "paused",
+              "target_price": 7600,
+              "currency": "TWD",
+              "alerts_paused": true,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "limitRow07000000000000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-BKK_2027-07",
+              "route": "TPE-BKK",
+              "origin": "TPE",
+              "destination": "BKK",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "曼谷",
+                "en": "Bangkok"
+              },
+              "departure_month": "2027-07",
+              "month_mode": "fixed",
+              "effective_month": "2027-07",
+              "status": "active",
+              "target_price": 7700,
+              "currency": "TWD",
+              "alerts_paused": false,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "limitRow08000000000000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-BKK_2027-08",
+              "route": "TPE-BKK",
+              "origin": "TPE",
+              "destination": "BKK",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "曼谷",
+                "en": "Bangkok"
+              },
+              "departure_month": "2027-08",
+              "month_mode": "fixed",
+              "effective_month": "2027-08",
+              "status": "active",
+              "target_price": 7800,
+              "currency": "TWD",
+              "alerts_paused": false,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "limitRow09000000000000",
+              "fare_check": null
+            },
+            {
+              "id": "TPE-BKK_2027-09",
+              "route": "TPE-BKK",
+              "origin": "TPE",
+              "destination": "BKK",
+              "origin_name": {
+                "zh": "台北",
+                "en": "Taipei"
+              },
+              "destination_name": {
+                "zh": "曼谷",
+                "en": "Bangkok"
+              },
+              "departure_month": "2027-09",
+              "month_mode": "fixed",
+              "effective_month": "2027-09",
+              "status": "paused",
+              "target_price": 7900,
+              "currency": "TWD",
+              "alerts_paused": true,
+              "plan_name": null,
+              "created_at": "2026-11-01T02:00:00.000Z",
+              "updated_at": "2026-11-01T02:00:00.000Z",
+              "version": "limitRow10000000000000",
+              "fare_check": null
+            }
+          ],
+          "limits": {
+            "max": 10,
+            "used": 10
+          },
+          "months": {
+            "current": "2026-11",
+            "selectable": [
+              "2026-12",
+              "2027-01",
+              "2027-02",
+              "2027-03",
+              "2027-04",
+              "2027-05",
+              "2027-06",
+              "2027-07",
+              "2027-08",
+              "2027-09",
+              "2027-10",
+              "2027-11"
+            ]
+          }
+        }
+      },
+      "stored_keys_after": [
+        "TPE-BKK#2026-12",
+        "TPE-BKK#2027-01",
+        "TPE-BKK#2027-02",
+        "TPE-BKK#2027-03",
+        "TPE-BKK#2027-04",
+        "TPE-BKK#2027-05",
+        "TPE-BKK#2027-06",
+        "TPE-BKK#2027-07",
+        "TPE-BKK#2027-08",
+        "TPE-BKK#2027-09"
+      ]
+    },
+    {
+      "name": "create_fixed_month",
+      "description": "Create a fixed-month subscription: 201 with a new version token.",
+      "seed": [
+        "legacy_rolling_tokyo"
+      ],
+      "new_tokens": [
+        "newVersionA00000000000"
+      ],
+      "client": {
+        "op": "create",
+        "request": {
+          "origin": "TPE",
+          "destination": "LON",
+          "departure_month": "2027-03",
+          "target_price": 12000
+        }
+      },
+      "http": {
+        "method": "POST",
+        "path": "/subscriptions",
+        "query": null,
+        "body": {
+          "origin": "TPE",
+          "destination": "LON",
+          "departure_month": "2027-03",
+          "target_price": 12000
+        }
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "id": "TPE-LON_2027-03",
+          "route": "TPE-LON",
+          "origin": "TPE",
+          "destination": "LON",
+          "origin_name": {
+            "zh": "台北",
+            "en": "Taipei"
+          },
+          "destination_name": {
+            "zh": "倫敦",
+            "en": "London"
+          },
+          "departure_month": "2027-03",
+          "month_mode": "fixed",
+          "effective_month": "2027-03",
+          "status": "active",
+          "target_price": 12000,
+          "currency": "TWD",
+          "alerts_paused": false,
+          "plan_name": null,
+          "created_at": "2026-11-05T03:00:00.000Z",
+          "updated_at": "2026-11-05T03:00:00.000Z",
+          "version": "newVersionA00000000000",
+          "fare_check": null
+        }
+      },
+      "stored_keys_after": [
+        "TPE-LON#2027-03",
+        "TPE-TYO"
+      ]
+    },
+    {
+      "name": "create_limit_reached",
+      "description": "An eleventh subscription is refused; nothing is written.",
+      "seed": [
+        "limit_01",
+        "limit_02",
+        "limit_03",
+        "limit_04",
+        "limit_05",
+        "limit_06",
+        "limit_07",
+        "limit_08",
+        "limit_09",
+        "limit_10"
+      ],
+      "new_tokens": [
+        "newVersionA00000000000"
+      ],
+      "client": {
+        "op": "create",
+        "request": {
+          "origin": "TPE",
+          "destination": "LON",
+          "departure_month": "2027-03",
+          "target_price": 12000
+        }
+      },
+      "http": {
+        "method": "POST",
+        "path": "/subscriptions",
+        "query": null,
+        "body": {
+          "origin": "TPE",
+          "destination": "LON",
+          "departure_month": "2027-03",
+          "target_price": 12000
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": "limit_reached",
+          "message": "每位使用者最多 10 筆航線訂閱（已暫停與已過期的訂閱也算在內），請先刪除不需要的訂閱。",
+          "details": {
+            "max": 10,
+            "used": 10
+          }
+        }
+      },
+      "stored_keys_after": [
+        "TPE-BKK#2026-12",
+        "TPE-BKK#2027-01",
+        "TPE-BKK#2027-02",
+        "TPE-BKK#2027-03",
+        "TPE-BKK#2027-04",
+        "TPE-BKK#2027-05",
+        "TPE-BKK#2027-06",
+        "TPE-BKK#2027-07",
+        "TPE-BKK#2027-08",
+        "TPE-BKK#2027-09"
+      ]
+    },
+    {
+      "name": "create_duplicate",
+      "description": "The same route and month again: 409 duplicate_subscription.",
+      "seed": [
+        "fixed_jan"
+      ],
+      "new_tokens": [
+        "newVersionA00000000000"
+      ],
+      "client": {
+        "op": "create",
+        "request": {
+          "origin": "TPE",
+          "destination": "OSA",
+          "departure_month": "2027-01",
+          "target_price": 7000
+        }
+      },
+      "http": {
+        "method": "POST",
+        "path": "/subscriptions",
+        "query": null,
+        "body": {
+          "origin": "TPE",
+          "destination": "OSA",
+          "departure_month": "2027-01",
+          "target_price": 7000
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": "duplicate_subscription",
+          "message": "你已經訂閱過「台北 → 大阪」 2027 年 1 月出發的航線，同一航線同一月份只能訂閱一次。",
+          "details": {
+            "route": "TPE-OSA",
+            "departure_month": "2027-01"
+          }
+        }
+      },
+      "stored_keys_after": [
+        "TPE-OSA#2027-01"
+      ]
+    },
+    {
+      "name": "create_invalid_target_price",
+      "description": "Validation error: target price 0.",
+      "seed": [],
+      "new_tokens": [],
+      "client": {
+        "op": "create",
+        "request": {
+          "origin": "TPE",
+          "destination": "LON",
+          "departure_month": "2027-03",
+          "target_price": 0
+        }
+      },
+      "http": {
+        "method": "POST",
+        "path": "/subscriptions",
+        "query": null,
+        "body": {
+          "origin": "TPE",
+          "destination": "LON",
+          "departure_month": "2027-03",
+          "target_price": 0
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "error": "invalid_target_price",
+          "message": "目標價請輸入 1 到 1,000,000 之間的整數（新台幣）。"
+        }
+      },
+      "stored_keys_after": []
+    },
+    {
+      "name": "create_invalid_departure_month",
+      "description": "Validation error: the current month is not selectable.",
+      "seed": [],
+      "new_tokens": [],
+      "client": {
+        "op": "create",
+        "request": {
+          "origin": "TPE",
+          "destination": "LON",
+          "departure_month": "2026-11",
+          "target_price": 12000
+        }
+      },
+      "http": {
+        "method": "POST",
+        "path": "/subscriptions",
+        "query": null,
+        "body": {
+          "origin": "TPE",
+          "destination": "LON",
+          "departure_month": "2026-11",
+          "target_price": 12000
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "error": "invalid_departure_month",
+          "message": "請選擇 2026 年 12 月 到 2027 年 11 月 之間的出發月份。"
+        }
+      },
+      "stored_keys_after": []
+    },
+    {
+      "name": "update_target_price",
+      "description": "Change the target price with the current version: 200, new version.",
+      "seed": [
+        "fixed_jan"
+      ],
+      "new_tokens": [
+        "newVersionA00000000000"
+      ],
+      "client": {
+        "op": "update",
+        "id": "TPE-OSA_2027-01",
+        "patch": {
+          "target_price": 7500,
+          "if_version": "fixedJanVersion0000000"
+        }
+      },
+      "http": {
+        "method": "PATCH",
+        "path": "/subscriptions/TPE-OSA_2027-01",
+        "query": null,
+        "body": {
+          "target_price": 7500,
+          "if_version": "fixedJanVersion0000000"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "TPE-OSA_2027-01",
+          "route": "TPE-OSA",
+          "origin": "TPE",
+          "destination": "OSA",
+          "origin_name": {
+            "zh": "台北",
+            "en": "Taipei"
+          },
+          "destination_name": {
+            "zh": "大阪",
+            "en": "Osaka"
+          },
+          "departure_month": "2027-01",
+          "month_mode": "fixed",
+          "effective_month": "2027-01",
+          "status": "active",
+          "target_price": 7500,
+          "currency": "TWD",
+          "alerts_paused": false,
+          "plan_name": null,
+          "created_at": "2026-11-01T02:00:00.000Z",
+          "updated_at": "2026-11-05T03:00:00.000Z",
+          "version": "newVersionA00000000000",
+          "fare_check": null
+        }
+      },
+      "stored_keys_after": [
+        "TPE-OSA#2027-01"
+      ]
+    },
+    {
+      "name": "update_pause_legacy_rolling",
+      "description": "Pause a legacy rolling M1 row using its legacy- version.",
+      "seed": [
+        "legacy_rolling_tokyo"
+      ],
+      "new_tokens": [
+        "newVersionA00000000000"
+      ],
+      "client": {
+        "op": "update",
+        "id": "TPE-TYO",
+        "patch": {
+          "alerts_paused": true,
+          "if_version": "legacy-4d1c2f0216c0346b4dfda29c5c271256"
+        }
+      },
+      "http": {
+        "method": "PATCH",
+        "path": "/subscriptions/TPE-TYO",
+        "query": null,
+        "body": {
+          "alerts_paused": true,
+          "if_version": "legacy-4d1c2f0216c0346b4dfda29c5c271256"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "TPE-TYO",
+          "route": "TPE-TYO",
+          "origin": "TPE",
+          "destination": "TYO",
+          "origin_name": {
+            "zh": "台北",
+            "en": "Taipei"
+          },
+          "destination_name": {
+            "zh": "東京",
+            "en": "Tokyo"
+          },
+          "departure_month": null,
+          "month_mode": "rolling",
+          "effective_month": "2026-12",
+          "status": "paused",
+          "target_price": 9325,
+          "currency": "TWD",
+          "alerts_paused": true,
+          "plan_name": "tokyo",
+          "created_at": "2026-10-30T08:00:00+00:00",
+          "updated_at": "2026-11-05T03:00:00.000Z",
+          "version": "newVersionA00000000000",
+          "fare_check": null
+        }
+      },
+      "stored_keys_after": [
+        "TPE-TYO"
+      ]
+    },
+    {
+      "name": "update_month_move",
+      "description": "Move a fixed-month subscription to another month: a new id.",
+      "seed": [
+        "fixed_jan"
+      ],
+      "new_tokens": [
+        "newVersionA00000000000"
+      ],
+      "client": {
+        "op": "update",
+        "id": "TPE-OSA_2027-01",
+        "patch": {
+          "departure_month": "2027-02",
+          "if_version": "fixedJanVersion0000000"
+        }
+      },
+      "http": {
+        "method": "PATCH",
+        "path": "/subscriptions/TPE-OSA_2027-01",
+        "query": null,
+        "body": {
+          "departure_month": "2027-02",
+          "if_version": "fixedJanVersion0000000"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "id": "TPE-OSA_2027-02",
+          "route": "TPE-OSA",
+          "origin": "TPE",
+          "destination": "OSA",
+          "origin_name": {
+            "zh": "台北",
+            "en": "Taipei"
+          },
+          "destination_name": {
+            "zh": "大阪",
+            "en": "Osaka"
+          },
+          "departure_month": "2027-02",
+          "month_mode": "fixed",
+          "effective_month": "2027-02",
+          "status": "active",
+          "target_price": 8000,
+          "currency": "TWD",
+          "alerts_paused": false,
+          "plan_name": null,
+          "created_at": "2026-11-01T02:00:00.000Z",
+          "updated_at": "2026-11-05T03:00:00.000Z",
+          "version": "newVersionA00000000000",
+          "fare_check": null
+        }
+      },
+      "stored_keys_after": [
+        "TPE-OSA#2027-02"
+      ]
+    },
+    {
+      "name": "update_stale_version",
+      "description": "A stale (but well-formed) version: 409 conflict, nothing changes.",
+      "seed": [
+        "fixed_jan"
+      ],
+      "new_tokens": [
+        "newVersionA00000000000"
+      ],
+      "client": {
+        "op": "update",
+        "id": "TPE-OSA_2027-01",
+        "patch": {
+          "target_price": 7500,
+          "if_version": "staleVersion0000000000"
+        }
+      },
+      "http": {
+        "method": "PATCH",
+        "path": "/subscriptions/TPE-OSA_2027-01",
+        "query": null,
+        "body": {
+          "target_price": 7500,
+          "if_version": "staleVersion0000000000"
+        }
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": "conflict",
+          "message": "這筆訂閱剛剛被其他操作變更了，請重新整理後再試一次。"
+        }
+      },
+      "stored_keys_after": [
+        "TPE-OSA#2027-01"
+      ]
+    },
+    {
+      "name": "update_missing_version",
+      "description": "No if_version: 428 version_required.",
+      "seed": [
+        "fixed_jan"
+      ],
+      "new_tokens": [
+        "newVersionA00000000000"
+      ],
+      "client": {
+        "op": "update",
+        "id": "TPE-OSA_2027-01",
+        "patch": {
+          "target_price": 7500
+        }
+      },
+      "http": {
+        "method": "PATCH",
+        "path": "/subscriptions/TPE-OSA_2027-01",
+        "query": null,
+        "body": {
+          "target_price": 7500
+        }
+      },
+      "response": {
+        "status": 428,
+        "body": {
+          "error": "version_required",
+          "message": "請重新整理頁面後再試一次。"
+        }
+      },
+      "stored_keys_after": [
+        "TPE-OSA#2027-01"
+      ]
+    },
+    {
+      "name": "update_invalid_version",
+      "description": "A malformed if_version: 400 invalid_version.",
+      "seed": [
+        "fixed_jan"
+      ],
+      "new_tokens": [
+        "newVersionA00000000000"
+      ],
+      "client": {
+        "op": "update",
+        "id": "TPE-OSA_2027-01",
+        "patch": {
+          "target_price": 7500,
+          "if_version": "not a version"
+        }
+      },
+      "http": {
+        "method": "PATCH",
+        "path": "/subscriptions/TPE-OSA_2027-01",
+        "query": null,
+        "body": {
+          "target_price": 7500,
+          "if_version": "not a version"
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "error": "invalid_version",
+          "message": "請重新整理頁面後再試一次。"
+        }
+      },
+      "stored_keys_after": [
+        "TPE-OSA#2027-01"
+      ]
+    },
+    {
+      "name": "update_other_users_subscription",
+      "description": "Another user's subscription ID is not found for this user.",
+      "seed": [],
+      "new_tokens": [
+        "newVersionA00000000000"
+      ],
+      "client": {
+        "op": "update",
+        "id": "TPE-PAR_2027-01",
+        "patch": {
+          "target_price": 1000,
+          "if_version": "otherUsersVersion00000"
+        }
+      },
+      "http": {
+        "method": "PATCH",
+        "path": "/subscriptions/TPE-PAR_2027-01",
+        "query": null,
+        "body": {
+          "target_price": 1000,
+          "if_version": "otherUsersVersion00000"
+        }
+      },
+      "seed_other": [
+        "other_users_fixed"
+      ],
+      "response": {
+        "status": 404,
+        "body": {
+          "error": "not_found",
+          "message": "找不到這筆訂閱，可能已被刪除。"
+        }
+      },
+      "stored_keys_after": []
+    },
+    {
+      "name": "remove_fixed_month",
+      "description": "Delete with the current version: 204, empty body.",
+      "seed": [
+        "fixed_jan"
+      ],
+      "new_tokens": [],
+      "client": {
+        "op": "remove",
+        "id": "TPE-OSA_2027-01",
+        "if_version": "fixedJanVersion0000000"
+      },
+      "http": {
+        "method": "DELETE",
+        "path": "/subscriptions/TPE-OSA_2027-01",
+        "query": {
+          "if_version": "fixedJanVersion0000000"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 204,
+        "body": null
+      },
+      "stored_keys_after": []
+    },
+    {
+      "name": "remove_legacy_rolling",
+      "description": "Delete a legacy rolling row with its legacy- version (in the query string).",
+      "seed": [
+        "legacy_rolling_tokyo"
+      ],
+      "new_tokens": [],
+      "client": {
+        "op": "remove",
+        "id": "TPE-TYO",
+        "if_version": "legacy-4d1c2f0216c0346b4dfda29c5c271256"
+      },
+      "http": {
+        "method": "DELETE",
+        "path": "/subscriptions/TPE-TYO",
+        "query": {
+          "if_version": "legacy-4d1c2f0216c0346b4dfda29c5c271256"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 204,
+        "body": null
+      },
+      "stored_keys_after": []
+    },
+    {
+      "name": "remove_stale_version",
+      "description": "Delete with a stale version: 409 conflict, nothing changes.",
+      "seed": [
+        "fixed_jan"
+      ],
+      "new_tokens": [],
+      "client": {
+        "op": "remove",
+        "id": "TPE-OSA_2027-01",
+        "if_version": "staleVersion0000000000"
+      },
+      "http": {
+        "method": "DELETE",
+        "path": "/subscriptions/TPE-OSA_2027-01",
+        "query": {
+          "if_version": "staleVersion0000000000"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 409,
+        "body": {
+          "error": "conflict",
+          "message": "這筆訂閱剛剛被其他操作變更了，請重新整理後再試一次。"
+        }
+      },
+      "stored_keys_after": [
+        "TPE-OSA#2027-01"
+      ]
+    },
+    {
+      "name": "remove_missing_version",
+      "description": "Delete without if_version: 428 version_required.",
+      "seed": [
+        "fixed_jan"
+      ],
+      "new_tokens": [],
+      "client": {
+        "op": "remove",
+        "id": "TPE-OSA_2027-01",
+        "if_version": null
+      },
+      "http": {
+        "method": "DELETE",
+        "path": "/subscriptions/TPE-OSA_2027-01",
+        "query": null,
+        "body": null
+      },
+      "response": {
+        "status": 428,
+        "body": {
+          "error": "version_required",
+          "message": "請重新整理頁面後再試一次。"
+        }
+      },
+      "stored_keys_after": [
+        "TPE-OSA#2027-01"
+      ]
+    }
+  ]
+}
