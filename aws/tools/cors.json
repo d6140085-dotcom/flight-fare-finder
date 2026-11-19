@@ -1,0 +1,18 @@
+{
+  "_doc": [
+    "CORS for the M1.4 subscriptions HTTP API (API Gateway HTTP API CorsConfiguration).",
+    "b3_allow_origins: the intended production list for the B3 route change set. It is explicit:",
+    "never '*' (M1's flight-m1-subscribe-api currently uses '*', which B3 replaces).",
+    "The owner confirms the production origin before B3. Vercel preview origins are deliberately",
+    "absent: previews never call the production API (Phase 3B decision A).",
+    "local_allow_origins: what aws/tools/local_api.py allows by default (Vite dev and preview).",
+    "Used by aws/tools/local_api.py and checked by aws/tests/test_m14_local_harness.py."
+  ],
+  "allow_methods": ["DELETE", "GET", "OPTIONS", "PATCH", "POST"],
+  "allow_headers": ["authorization", "content-type"],
+  "expose_headers": [],
+  "allow_credentials": false,
+  "max_age": 600,
+  "b3_allow_origins": ["https://flight-fare-finder-red.vercel.app"],
+  "local_allow_origins": ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:4173", "http://127.0.0.1:4173"]
+}
