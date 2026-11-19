@@ -44,10 +44,16 @@ function apiUrl(): string {
   return url.replace(/\/+$/, "");
 }
 
+/** The signed-in user's Supabase access token, or null when there is no session. The APIs
+ * identify the user from this token, never from an email in the request. Never log it. */
+export async function getAccessToken(): Promise<string | null> {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token ?? null;
+}
+
 // The API identifies the user from their Supabase session token, never from an email in the request.
 async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
+  const token = await getAccessToken();
   if (!token) throw new Error("Not signed in.");
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);

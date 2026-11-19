@@ -29,5 +29,5 @@ jobs:
       - run: pip install -r aws/requirements-test.txt
       - name: Wait for DynamoDB Local
         run: for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8000 && break; sleep 1; done
-      - name: API tests + B4 scenarios on DynamoDB Local
-        run: python -m unittest -v aws/tests/test_m14_subscriptions_api.py aws/tests/test_m14_ddb_scenarios.py
+      - name: API tests + B4 scenarios + HTTP contract examples on DynamoDB Local
+        run: python -m unittest -v aws/tests/test_m14_subscriptions_api.py aws/tests/test_m14_ddb_scenarios.py aws/tests/test_m14_http_contract.py

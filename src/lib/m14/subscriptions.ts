@@ -36,8 +36,9 @@ export interface RouteSubscription {
   currency: "TWD";
   alerts_paused: boolean;
   plan_name: string | null; // set only on the two M1 fixed-plan rows
-  created_at: string;
-  updated_at: string;
+  /** Informational. Null for M1 rows that never stored one (API contract §8.1). */
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 export type Status = "active" | "paused" | "expired";
