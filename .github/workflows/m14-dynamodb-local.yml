@@ -37,6 +37,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm install --no-audit --no-fund  # the repository has no npm lock file
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile  # the repository's lock file is bun.lock
       - name: HttpSubscriptionsClient over real HTTP (harness) on DynamoDB Local
         run: npm run test:harness
