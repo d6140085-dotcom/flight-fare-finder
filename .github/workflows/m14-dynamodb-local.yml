@@ -37,7 +37,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
-      - run: npm ci
+      - run: npm install --no-audit --no-fund  # the repository has no npm lock file
       - name: HttpSubscriptionsClient over real HTTP (harness) on DynamoDB Local
         run: npm run test:harness
