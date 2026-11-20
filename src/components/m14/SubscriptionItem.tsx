@@ -27,7 +27,12 @@ import { routeLabel, routeLabelEn } from "@/lib/m14/catalog";
 import { checkedAtLabel, type FareDisplay } from "@/lib/m14/fare-status";
 import type { TargetComparison } from "@/lib/m14/fare-view";
 import { effectiveMonth, monthLabel } from "@/lib/m14/months";
-import { statusOf, type RouteSubscription, type Validated } from "@/lib/m14/subscriptions";
+import {
+  statusOf,
+  type RouteSubscription,
+  type Status,
+  type Validated,
+} from "@/lib/m14/subscriptions";
 import { cn } from "@/lib/utils";
 import { RouteForm } from "./RouteForm";
 
@@ -50,7 +55,8 @@ const FARE_WORD: Record<FareDisplay["kind"], string> = {
 };
 
 interface SubscriptionItemProps {
-  sub: RouteSubscription;
+  /** `status` comes from the API list; without it the status is computed locally. */
+  sub: RouteSubscription & { status?: Status };
   subs: readonly RouteSubscription[];
   now: Date;
   /** What the latest fare check says. */
@@ -63,6 +69,10 @@ interface SubscriptionItemProps {
   links?: ReactNode;
   /** A request for this row is in flight: actions are disabled. */
   busy?: boolean;
+  /** Another write is in flight: actions are disabled (no double submission). */
+  locked?: boolean;
+  /** The server's selectable months, for the edit form. */
+  months?: readonly string[] | undefined;
   /** May return a promise; resolving to false keeps the edit form open. */
   onEdit: (value: Validated) => void | boolean | Promise<boolean>;
   onPause: () => void;
@@ -99,6 +109,8 @@ export function SubscriptionItem({
   itinerary = null,
   links,
   busy = false,
+  locked = false,
+  months,
   onEdit,
   onPause,
   onResume,
@@ -111,7 +123,9 @@ export function SubscriptionItem({
     sub.departure_month === null
       ? `每月滾動（${monthLabel(effectiveMonth(null, now))}）`
       : monthLabel(sub.departure_month);
-  const status = statusOf(sub, now);
+  // The server's status (API list) wins; the mock and older callers compute it locally.
+  const status: Status = sub.status ?? statusOf(sub, now);
+  const blocked = busy || locked;
   const shown = fare.kind === "ok" && price !== null;
   const problem = fare.kind === "error" || fare.kind === "expired";
 
@@ -224,6 +238,8 @@ export function SubscriptionItem({
             editing={sub}
             submitLabel="儲存變更"
             busy={busy}
+            disabled={locked}
+            months={months}
             onSubmit={async (value) => {
               const ok = await onEdit(value);
               if (ok !== false) setEditing(false);
@@ -235,20 +251,25 @@ export function SubscriptionItem({
       ) : (
         <div className="mt-4 flex flex-wrap gap-2 border-t border-border pt-3">
           {status === "expired" ? (
-            <Button size="sm" onClick={() => setEditing(true)} disabled={busy}>
+            <Button size="sm" onClick={() => setEditing(true)} disabled={blocked}>
               <RotateCcw className="h-4 w-4" /> 重新啟用
             </Button>
           ) : (
             <>
-              <Button size="sm" variant="outline" onClick={() => setEditing(true)} disabled={busy}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setEditing(true)}
+                disabled={blocked}
+              >
                 <Pencil className="h-4 w-4" /> 編輯
               </Button>
               {sub.alerts_paused ? (
-                <Button size="sm" variant="outline" onClick={onResume} disabled={busy}>
+                <Button size="sm" variant="outline" onClick={onResume} disabled={blocked}>
                   <Play className="h-4 w-4" /> 恢復追蹤
                 </Button>
               ) : (
-                <Button size="sm" variant="outline" onClick={onPause} disabled={busy}>
+                <Button size="sm" variant="outline" onClick={onPause} disabled={blocked}>
                   <Pause className="h-4 w-4" /> 暫停追蹤
                 </Button>
               )}
@@ -256,7 +277,7 @@ export function SubscriptionItem({
           )}
           <AlertDialog>
             <AlertDialogTrigger asChild>
-              <Button size="sm" variant="outline" className="text-destructive" disabled={busy}>
+              <Button size="sm" variant="outline" className="text-destructive" disabled={blocked}>
                 <Trash2 className="h-4 w-4" /> 刪除
               </Button>
             </AlertDialogTrigger>
