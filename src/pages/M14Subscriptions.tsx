@@ -2,13 +2,18 @@ import { useState } from "react";
 import { Link, useLoaderData, useNavigate } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import type { User } from "@supabase/supabase-js";
-import { FlaskConical, LogOut } from "lucide-react";
+import { CircleAlert, FlaskConical, LogOut } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/SiteHeader";
 import { SubscriptionsManager } from "@/components/m14/SubscriptionsManager";
-import { createSubscriptionsClient } from "@/lib/m14/client-factory";
-import { MOCK_SCENARIOS, type MockScenario } from "@/lib/m14/mock-client";
+import type { SubscriptionsClient } from "@/lib/m14/api";
+import {
+  ClientUnavailable,
+  HTTP_COMPILED_IN,
+  createSubscriptionsClient,
+} from "@/lib/m14/client-factory";
+import { MOCK_SCENARIOS, MockSubscriptionsClient, type MockScenario } from "@/lib/m14/mock-client";
 import { usePageMeta } from "@/lib/page-meta";
 import { mockDataAllowed } from "@/lib/m14/routes";
 import { NotFoundPage } from "./RootLayout";
@@ -54,13 +59,22 @@ function M14SubscriptionsPage({
   const user = mode === "app" ? loader?.user : undefined;
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [client] = useState(() =>
-    createSubscriptionsClient({ now, latencyMs, scenario: initialScenario }),
-  );
+  // Mock by default; the local HTTP harness only on a correctly configured dev server
+  // (client-factory.ts). A bad HTTP setting is shown, never replaced by mock data.
+  const [created] = useState<{ client: SubscriptionsClient } | { error: string }>(() => {
+    try {
+      return { client: createSubscriptionsClient({ now, latencyMs, scenario: initialScenario }) };
+    } catch (e) {
+      if (e instanceof ClientUnavailable) return { error: e.message };
+      throw e;
+    }
+  });
+  const client = "client" in created ? created.client : null;
+  const mock = client instanceof MockSubscriptionsClient ? client : null;
   const [scenario, setScenario] = useState<MockScenario>(initialScenario);
 
   function switchScenario(next: MockScenario) {
-    client.setScenario(next);
+    mock?.setScenario(next);
     setScenario(next);
     void queryClient.resetQueries({ queryKey: ["m14", "subscriptions"] });
   }
@@ -100,25 +114,35 @@ function M14SubscriptionsPage({
         >
           <FlaskConical className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
           <div className="min-w-0 space-y-2">
-            <p>
-              <span className="font-semibold">開發預覽（模擬資料）</span>
-              ：此頁連接的是瀏覽器內的模擬
-              API，不會建立、修改或刪除任何真實訂閱，也不會查詢票價或寄出通知。重新整理就會還原。
-            </p>
-            <label className="flex flex-wrap items-center gap-2">
-              <span>模擬情境</span>
-              <select
-                className="h-8 rounded-md border border-input bg-background px-2 text-sm"
-                value={scenario}
-                onChange={(e) => switchScenario(e.target.value as MockScenario)}
-              >
-                {MOCK_SCENARIOS.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {HTTP_COMPILED_IN && client?.kind === "http" ? (
+              <p>
+                <span className="font-semibold">本機開發（本機 HTTP 測試環境）</span>
+                ：此頁連接的是本機（localhost）的訂閱 API
+                測試環境與測試資料，使用開發用的測試身分；不會連到正式服務，也不會查詢票價或寄出通知。
+              </p>
+            ) : (
+              <p>
+                <span className="font-semibold">開發預覽（模擬資料）</span>
+                ：此頁連接的是瀏覽器內的模擬
+                API，不會建立、修改或刪除任何真實訂閱，也不會查詢票價或寄出通知。重新整理就會還原。
+              </p>
+            )}
+            {mock && (
+              <label className="flex flex-wrap items-center gap-2">
+                <span>模擬情境</span>
+                <select
+                  className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+                  value={scenario}
+                  onChange={(e) => switchScenario(e.target.value as MockScenario)}
+                >
+                  {MOCK_SCENARIOS.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
         </div>
 
@@ -131,15 +155,27 @@ function M14SubscriptionsPage({
           )}
         </h1>
 
-        <SubscriptionsManager
-          client={client}
-          cacheKey={user?.id ?? "preview"}
-          now={now}
-          marker={DEMO_MARKER}
-        />
+        {client ? (
+          <SubscriptionsManager
+            client={client}
+            cacheKey={user?.id ?? "preview"}
+            now={now}
+            // The test marker only with mock data; HTTP mode builds no affiliate links.
+            marker={mock ? DEMO_MARKER : null}
+          />
+        ) : (
+          <div role="alert" className="rounded-2xl border border-destructive/50 bg-card p-6">
+            <p className="flex items-start gap-2">
+              <CircleAlert className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
+              本機 HTTP 模式設定不正確，未連線：{"error" in created ? created.error : ""}
+            </p>
+          </div>
+        )}
       </main>
       <footer className="border-t border-border py-8 text-center text-sm text-muted-foreground">
-        M1.4 Phase 3A · 模擬資料
+        {HTTP_COMPILED_IN && client?.kind === "http"
+          ? "M1.4 Phase 3B · 本機 HTTP 測試環境"
+          : "M1.4 Phase 3A · 模擬資料"}
       </footer>
     </div>
   );

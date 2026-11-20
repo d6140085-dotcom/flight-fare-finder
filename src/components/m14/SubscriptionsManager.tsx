@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -17,6 +17,7 @@ import {
 } from "@/lib/m14/api";
 import { routeLabel } from "@/lib/m14/catalog";
 import { fareView } from "@/lib/m14/fare-view";
+import { writeOutcome } from "@/lib/m14/write-outcome";
 import type { Validated } from "@/lib/m14/subscriptions";
 
 interface SubscriptionsManagerProps {
@@ -40,8 +41,12 @@ export function SubscriptionsManager({
 }: SubscriptionsManagerProps) {
   const queryClient = useQueryClient();
   const queryKey = ["m14", "subscriptions", client.kind, cacheKey];
-  /** Public ID of the subscription with a request in flight (R-MM-1: never the route pair). */
-  const [busyId, setBusyId] = useState<string | null>(null);
+  /**
+   * The write in flight: a subscription's public ID (R-MM-1: never the route pair) or "create".
+   * Only one write at a time: every other write control is disabled until it settles.
+   */
+  const [pending, setPending] = useState<string | null>(null);
+  const inFlight = useRef(false);
   const [writeError, setWriteError] = useState<string | null>(null);
 
   const list = useQuery<ListResponse, unknown>({
@@ -54,11 +59,12 @@ export function SubscriptionsManager({
 
   const refresh = () => queryClient.invalidateQueries({ queryKey });
 
+  // Phase 3B-C: a failed write is never resent. Stale, limit and uncertain outcomes re-read the
+  // list once so the user sees the server's state; the form keeps what was typed.
   function reportFailure(err: unknown, ctx: { origin?: string; destination?: string } = {}) {
-    setWriteError(apiErrorMessage(err, { ...ctx, now: now() }));
-    if (err instanceof ApiError && (err.code === "conflict" || err.code === "not_found")) {
-      void refresh();
-    }
+    const outcome = writeOutcome(err, { ...ctx, now: now() });
+    setWriteError(outcome.message);
+    if (outcome.reload) void refresh();
   }
 
   const create = useMutation({
@@ -84,7 +90,9 @@ export function SubscriptionsManager({
     success: string,
     ctx: { origin?: string; destination?: string } = {},
   ): Promise<boolean> {
-    setBusyId(id);
+    if (inFlight.current) return false; // a write is already in flight: no double submission
+    inFlight.current = true;
+    setPending(id ?? "create");
     setWriteError(null);
     try {
       await action();
@@ -95,7 +103,8 @@ export function SubscriptionsManager({
       reportFailure(err, ctx);
       return false;
     } finally {
-      setBusyId(null);
+      inFlight.current = false;
+      setPending(null);
     }
   }
 
@@ -171,8 +180,9 @@ export function SubscriptionsManager({
             subs={subs}
             now={today}
             submitLabel="開始追蹤"
-            busy={create.isPending}
-            disabled={full}
+            busy={pending === "create"}
+            disabled={full || (pending !== null && pending !== "create")}
+            months={data.months.selectable}
             onSubmit={(value) =>
               run(
                 null,
@@ -243,7 +253,9 @@ export function SubscriptionsManager({
                   comparison={view.comparison}
                   itinerary={view.itinerary}
                   links={view.links ? <SearchLinks links={view.links} /> : null}
-                  busy={busyId === sub.id}
+                  busy={pending === sub.id}
+                  locked={pending !== null && pending !== sub.id}
+                  months={data.months.selectable}
                   onEdit={(value) => {
                     const patch: PatchRequest = { if_version: sub.version };
                     if (value.origin !== sub.origin || value.destination !== sub.destination) {

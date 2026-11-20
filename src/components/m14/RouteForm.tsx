@@ -38,6 +38,8 @@ interface RouteFormProps {
   busy?: boolean;
   /** Disables submitting (for example when the subscription limit is reached). */
   disabled?: boolean;
+  /** The server's selectable months (list response). Defaults to the local calculation. */
+  months?: readonly string[] | undefined;
 }
 
 export function RouteForm({
@@ -49,9 +51,10 @@ export function RouteForm({
   onCancel,
   busy = false,
   disabled = false,
+  months: serverMonths,
 }: RouteFormProps) {
   const id = useId();
-  const months = selectableMonths(now);
+  const months = serverMonths ?? selectableMonths(now);
   const [origin, setOrigin] = useState(editing?.origin ?? "");
   const [destination, setDestination] = useState(editing?.destination ?? "");
   const [month, setMonth] = useState(
@@ -72,7 +75,7 @@ export function RouteForm({
     e.preventDefault();
     if (busy || disabled) return;
     const input = { origin, destination, month, targetText };
-    const result = validate(subs, input, editing ? { editing, now } : { now });
+    const result = validate(subs, input, editing ? { editing, now, months } : { now, months });
     if (!result.ok) {
       setErrors(result.errors);
       return;

@@ -492,13 +492,13 @@ describe("safety and isolation", () => {
       return statSync(p).isDirectory() ? files(p) : [p];
     });
 
-  it("is not imported by any application module (only by its own tests)", () => {
+  it("is imported only by the fail-closed client factory (Phase 3B-C)", () => {
     const importers = files(SRC)
       .filter((f) => /\.(ts|tsx)$/.test(f) && !/\.test\.(ts|tsx)$/.test(f))
       .filter((f) => !f.endsWith(join("m14", "http-client.ts")))
       .filter((f) => /from\s+["'][^"']*http-client["']/.test(readFileSync(f, "utf8")))
       .map((f) => relative(SRC, f));
-    expect(importers).toEqual([]);
+    expect(importers).toEqual([join("lib", "m14", "client-factory.ts")]);
   });
 
   it("reads no environment variable and contains no API URL", () => {
@@ -508,9 +508,14 @@ describe("safety and isolation", () => {
     expect(source).not.toMatch(/console\./);
   });
 
-  it("the client factory still builds only the mock client", () => {
-    const factory = readFileSync(join(__dirname, "client-factory.ts"), "utf8");
-    expect(factory).toContain("MockSubscriptionsClient");
-    expect(factory).not.toMatch(/HttpSubscriptionsClient|http-client/);
+  it("the client factory gates the HTTP client behind the build-time switch and never uses the M1 API URL", () => {
+    const code = readFileSync(join(__dirname, "client-factory.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, ""); // code only: the comments explain what is not used
+    expect(code).toContain("new MockSubscriptionsClient(");
+    expect(code).toMatch(/if \(HTTP_COMPILED_IN && config\.kind === "http"\)/);
+    expect(code).toMatch(/if \(!HTTP_COMPILED_IN\) return \{ kind: "mock" \}/);
+    expect(code).not.toMatch(/VITE_FLIGHT_API_URL/);
+    expect(code).not.toMatch(/getAccessToken|supabase/i);
   });
 });

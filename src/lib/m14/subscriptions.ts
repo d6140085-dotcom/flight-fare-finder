@@ -131,7 +131,13 @@ export interface Validated {
 export function validate(
   subs: readonly RouteSubscription[],
   input: FieldInput,
-  opts: { editing?: RouteSubscription; now: Date; policy?: SubscriptionPolicy },
+  opts: {
+    editing?: RouteSubscription;
+    now: Date;
+    policy?: SubscriptionPolicy;
+    /** The server's selectable months (list response); defaults to the local calculation. */
+    months?: readonly string[];
+  },
 ): { ok: true; value: Validated } | { ok: false; errors: ErrorCode[] } {
   const policy = opts.policy ?? POLICY;
   const { editing, now } = opts;
@@ -151,7 +157,10 @@ export function validate(
       errors.push("invalid_departure_month");
   } else if (!MONTH_RE.test(month)) {
     errors.push("invalid_departure_month");
-  } else if (month !== editing?.departure_month && !selectableMonths(now, policy).includes(month)) {
+  } else if (
+    month !== editing?.departure_month &&
+    !(opts.months ?? selectableMonths(now, policy)).includes(month)
+  ) {
     errors.push("invalid_departure_month");
   } else {
     departure_month = month;
