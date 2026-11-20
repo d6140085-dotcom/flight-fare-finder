@@ -18,6 +18,9 @@ Supabase answered 200 with a usable email, so every other path fails closed:
   * ``AuthUnavailable`` -> 503 ``auth_unavailable``: Supabase could not say who the caller is
     right now. Supabase 408/429/5xx, a timeout, a DNS, TLS or connection failure (refused,
     reset, closed early), or a 200 whose body cannot be decoded as a JSON object.
+  * A redirect (3xx) is never followed: following it would send the user's token and the
+    publishable key to another destination. It is treated as unavailable (503, reason
+    ``redirect``); the Location header is never read, logged or returned.
   * Any other status (404, 405, 409, 422, a non-200 2xx, ...) is unexpected. It is treated as
     unavailable too: it does not show that the session is invalid, so the user is not told to
     sign in again, and no data is read. Its status code is logged so it can be reclassified.
@@ -40,6 +43,19 @@ TEST_TLDS = (".test", ".example", ".invalid")
 INVALID_SESSION_STATUSES = frozenset({400, 401, 403})
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuses every redirect (301/302/303/307/308): the request carries the user's bearer token
+    and the publishable key, which must never reach any other destination. With no new request,
+    urllib raises HTTPError with the 3xx status instead of following it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# The default HTTPS handler is kept, so certificate and hostname verification are unchanged.
+_OPENER = urllib.request.build_opener(_NoRedirect())
+
+
 class AuthUnavailable(Exception):
     """Supabase could not confirm who the caller is right now; the API answers 503.
 
@@ -56,6 +72,8 @@ def _status_outcome(status):
     """None for a definitely invalid session; otherwise AuthUnavailable (temporary or unexpected)."""
     if status in INVALID_SESSION_STATUSES:
         return None
+    if isinstance(status, int) and 300 <= status <= 399:
+        raise AuthUnavailable("redirect")
     if status in (408, 429) or 500 <= status <= 599:
         raise AuthUnavailable(f"http_{status}")
     raise AuthUnavailable(f"unexpected_http_{status}" if isinstance(status, int) else "unexpected_http")
@@ -99,7 +117,7 @@ def direct_test_identity(event, env):
     return email if email and is_test_address(email) else None
 
 
-def resolve_email(event, env, opener=urllib.request.urlopen):
+def resolve_email(event, env, opener=_OPENER.open):
     if not isinstance(event, dict):
         return None
     if "requestContext" not in event:

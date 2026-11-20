@@ -190,7 +190,9 @@ class GuardTests(unittest.TestCase):
 
     def test_supabase_fault_injection_accepts_only_known_faults(self):
         h = local_api.Harness()
-        for kind in (400, 401, 403, 404, 408, 429, 500, 502, 503, 504, "timeout", "reset", "invalid_json"):
+        for kind in (400, 401, 403, 404, 408, 429, 500, 502, 503, 504, "timeout", "reset", "invalid_json",
+                     "redirect_301_http", "redirect_302_https", "redirect_303_https", "redirect_307_https",
+                     "redirect_308_https"):
             h.queue_supabase_fault(kind)
         for bad in (200, 302, 418, "503", "slow", None, True, 503.0, ["reset"]):
             with self.assertRaises(ValueError, msg=repr(bad)):
@@ -725,6 +727,38 @@ class HarnessIntegrationTests(unittest.TestCase):
                 self.assertEqual(self.state()["handler_calls"][-1]["ddb"], [])
         st = self.state()
         self.assertEqual((st["rows"], st["quota"]), (before["rows"], before["quota"]))
+
+    def test_supabase_redirects_are_never_followed(self):
+        """Phase 3B-E: a 3xx from Supabase (to another HTTPS origin, or to plain HTTP) is refused.
+        The redirect targets would answer as other@example.com; nothing may reach them."""
+        before = self.seeded_with_quota()
+        version = VECTORS["rows"]["fixed_jan"]["version_token"]
+        # Positive control: the capture really records requests and their credentials.
+        status, _, body, _ = Http(self.info["redirect_target_http"]).call("GET", "/auth/v1/user")
+        self.assertEqual((status, body["email"]), (200, "other@example.com"))
+        hits = self.state()["redirect_target_requests"]
+        self.assertEqual(hits, [{"scheme": "http", "method": "GET", "authorization": True, "apikey": False}])
+        start = len(hits)
+        for kind in ("redirect_301_http", "redirect_302_https", "redirect_303_https", "redirect_307_https",
+                     "redirect_308_https"):
+            for method, path, body, route_key in self.AUTH_ROUTES:
+                with self.subTest(kind=kind, route=route_key):
+                    self.supabase_fault(kind)
+                    status, headers, out, raw = self.auth_request(method, path, body, version)
+                    self.assertEqual((status, out["error"]), (503, "auth_unavailable"))
+                    self.assertEqual(headers.get("retry-after"), "5")
+                    self.assertNotIn("location", headers)
+                    for leak in (b"harness-redirect", b"127.0.0.1", b"harness-token-user", b"sb_publishable",
+                                 b"other@example.com", b"user@example.com"):
+                        self.assertNotIn(leak, raw)
+                    st = self.state()
+                    self.assertEqual(st["handler_calls"][-1], {"route": route_key, "status": 503, "ddb": []})
+                    self.assertEqual(len(st["redirect_target_requests"]), start, "nothing reached the target")
+        st = self.state()
+        self.assertEqual((st["rows"], st["quota"]), (before["rows"], before["quota"]))
+        # Supabase answers normally again: the same session works.
+        status, _, out, _ = self.http.call("GET", "/subscriptions")
+        self.assertEqual((status, len(out["subscriptions"])), (200, 2))
 
     def test_session_works_again_after_the_outage(self):
         self.seeded_with_quota()

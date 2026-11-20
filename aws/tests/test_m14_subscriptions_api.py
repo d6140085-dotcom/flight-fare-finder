@@ -13,6 +13,7 @@ Run: python3 -m unittest discover -s aws/tests -v
 import base64
 import contextlib
 import http.client
+import http.server
 import importlib.util
 import io
 import json
@@ -25,6 +26,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -346,6 +348,14 @@ class AuthClassificationTests(unittest.TestCase):
         for code in (201, 204, 206):  # an opener that does not raise for non-200 answers
             self.unavailable(self.answer(b'{"email": "user@example.com"}', status=code), f"unexpected_http_{code}")
 
+    def test_redirects_are_503(self):
+        for code in (301, 302, 303, 307, 308):
+            def refused(req, timeout, code=code):  # what the no-redirect opener raises
+                raise urllib.error.HTTPError(req.full_url, code, "redirect",
+                                             {"Location": "https://attacker.example/steal"}, io.BytesIO(b""))
+            self.unavailable(refused, "redirect")
+            self.unavailable(self.answer(b'{"email": "user@example.com"}', status=code), "redirect")
+
     def test_timeouts(self):
         self.unavailable(self.raises(urllib.error.URLError(TimeoutError("timed out"))), "timeout")
         self.unavailable(self.raises(urllib.error.URLError(socket.timeout("timed out"))), "timeout")
@@ -386,6 +396,125 @@ class AuthClassificationTests(unittest.TestCase):
         for exc in (TypeError("bug"), KeyError("bug"), AttributeError("bug")):
             with self.assertRaises(type(exc)):
                 self.resolve(self.raises(exc))
+
+
+class _CaptureServer:
+    """A loopback TCP listener that records every connection and the bytes it received."""
+
+    def __init__(self):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        self.received = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(2)
+                data = b""
+                try:
+                    while b"\r\n\r\n" not in data and len(data) < 65536:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                except OSError:
+                    pass
+                self.received.append(data)
+                body = json.dumps({"email": OTHER}).encode()
+                try:
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
+                                 b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+                except OSError:
+                    pass
+
+    def close(self):
+        self.sock.close()
+
+
+class _Redirector(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.send_response(self.server.code)
+        self.send_header("Location", self.server.location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+class RedirectBlockingTests(unittest.TestCase):
+    """Phase 3B-E: the Supabase request never follows a redirect, so the user's token and the
+    publishable key can never reach another destination. Loopback servers only, fake credentials."""
+
+    def setUp(self):
+        from subsapi import auth as auth_mod
+        self.auth_mod = auth_mod
+        self.target = _CaptureServer()
+        self.source = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Redirector)
+        threading.Thread(target=self.source.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.source.shutdown()
+        self.source.server_close()
+        self.target.close()
+
+    def fetch(self, opener, code, location):
+        self.source.code, self.source.location = code, location
+        req = urllib.request.Request(f"http://127.0.0.1:{self.source.server_address[1]}/auth/v1/user",
+                                     headers={"apikey": "sb_publishable_test", "Authorization": f"Bearer {SECRET_TOKEN}"})
+        return opener(req, timeout=5)
+
+    def test_no_redirect_is_followed_and_no_credentials_leave(self):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), self.auth_mod._NoRedirect()).open
+        targets = {"https": f"https://127.0.0.1:{self.target.port}/auth/v1/user",
+                   "http": f"http://127.0.0.1:{self.target.port}/auth/v1/user"}
+        for code in (301, 302, 303, 307, 308):
+            for scheme, location in targets.items():
+                with self.subTest(code=code, target=scheme):
+                    with self.assertRaises(urllib.error.HTTPError) as cm:
+                        self.fetch(opener, code, location)
+                    self.assertEqual(cm.exception.code, code)
+                    cm.exception.close()
+                    self.assertEqual(self.target.received, [], "no request reached the redirect target")
+        # Through resolve_email: 503 auth_unavailable (reason "redirect"), never the target's user.
+        event = apigw("GET /subscriptions", token=SECRET_TOKEN)
+        env = {**ENV, "SUPABASE_URL": "https://supabase.invalid"}
+        def via_source(req, timeout):
+            return self.fetch(opener, 302, targets["http"])
+        with self.assertRaises(AuthUnavailable) as cm:
+            resolve_email(event, env, via_source)
+        self.assertEqual(cm.exception.reason, "redirect")
+        self.assertEqual(self.target.received, [])
+
+    def test_control_a_redirect_following_opener_would_leak_the_credentials(self):
+        """Why the fix matters: urllib's default handler follows the redirect and resends both
+        credentials to the new destination (which then answers for another user)."""
+        following = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+        with self.fetch(following, 302, f"http://127.0.0.1:{self.target.port}/auth/v1/user") as r:
+            self.assertEqual(json.loads(r.read())["email"], OTHER)
+        self.assertEqual(len(self.target.received), 1)
+        self.assertIn(SECRET_TOKEN.encode(), self.target.received[0])
+        self.assertIn(b"sb_publishable_test", self.target.received[0])
+
+    def test_the_default_opener_refuses_redirects_and_still_verifies_tls(self):
+        import inspect
+        handlers = self.auth_mod._OPENER.handlers
+        redirect = [h for h in handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
+        self.assertEqual([type(h) for h in redirect], [self.auth_mod._NoRedirect])
+        https = [h for h in handlers if isinstance(h, urllib.request.HTTPSHandler)]
+        self.assertEqual(len(https), 1)
+        ctx = getattr(https[0], "_context", None)
+        if ctx is not None:  # None means http.client's default context, which verifies
+            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(ctx.check_hostname)
+        self.assertEqual(inspect.signature(resolve_email).parameters["opener"].default, self.auth_mod._OPENER.open)
 
 
 class SourceHygieneTests(unittest.TestCase):
@@ -1144,6 +1273,9 @@ class AuthOutageHandlerTests(LocalDynamoTestCase):
         "tls": lambda req: _raise(urllib.error.URLError(ssl.SSLCertVerificationError(1, "verify failed"))),
         "connection": lambda req: _raise(ConnectionResetError(104, "Connection reset by peer")),
         "invalid_response": lambda req: FakeResponse(b"<html>maintenance user@example.com</html>"),
+        "redirect": lambda req: _raise(urllib.error.HTTPError(
+            req.full_url, 302, "Found", {"Location": "https://attacker.example/steal?k=sb_publishable_test"},
+            io.BytesIO(b""))),
     }
 
     def setUp(self):
@@ -1225,7 +1357,8 @@ class AuthOutageHandlerTests(LocalDynamoTestCase):
                     line = json.loads(logs.strip().splitlines()[-1])
                     self.assertEqual(line, {"route": key, "user": "-", "status": 503, "error": "auth_unavailable",
                                             "reason": failure})
-                    for secret in (SECRET_TOKEN, USER, OTHER, "10.0.0.9", "maintenance"):
+                    for secret in (SECRET_TOKEN, USER, OTHER, "10.0.0.9", "maintenance", "attacker.example",
+                                   ENV["SUPABASE_PUBLISHABLE_KEY"]):
                         self.assertNotIn(secret, logs)
                         self.assertNotIn(secret, r["body"])
         self.assertEqual((self.raw(), self.quota(), self.raw(OTHER)), (rows, quota, theirs))

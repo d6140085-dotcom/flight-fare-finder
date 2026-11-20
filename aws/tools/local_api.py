@@ -69,6 +69,16 @@ FAULTS = {
 # is not JSON.
 SUPABASE_FAULT_STATUSES = (400, 401, 403, 404, 408, 429, 500, 502, 503, 504)
 SUPABASE_FAULT_KINDS = ("timeout", "reset", "invalid_json")
+# Redirect faults: the fake Supabase answers 3xx with a Location on one of the harness's two
+# loopback "redirect target" servers (another HTTPS origin, or plain HTTP). Each target records
+# every request it receives and whether it carried an Authorization header or an apikey, and
+# answers 200 with a *different* user's email, so a client that followed the redirect would be
+# both leaking the credentials and signing in as someone else.
+SUPABASE_REDIRECTS = {"redirect_301_http": (301, "http"), "redirect_302_https": (302, "https"),
+                      "redirect_303_https": (303, "https"), "redirect_307_https": (307, "https"),
+                      "redirect_308_https": (308, "https")}
+SUPABASE_FAULT_KINDS += tuple(SUPABASE_REDIRECTS)
+REDIRECT_TARGET_EMAIL = "other@example.com"
 SUPABASE_FAULT_DETAIL = {"code": 0, "msg": "harness fault: upstream db-7 at 10.0.0.9 is unavailable"}
 SUPABASE_TIMEOUT_DELAY = 6.0
 MAX_HANDLER_CALLS = 500
@@ -331,6 +341,14 @@ class FakeSupabaseHandler(BaseHTTPRequestHandler):
 
     def _fault(self, fault):
         self.close_connection = True
+        if fault in SUPABASE_REDIRECTS:
+            code, scheme = SUPABASE_REDIRECTS[fault]
+            port = self.harness.redirect_targets[scheme].server_address[1]
+            self.send_response(code)
+            self.send_header("Location", f"{scheme}://127.0.0.1:{port}/auth/v1/user?from=harness-redirect")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
         if isinstance(fault, int):
             return self._send(fault, {**SUPABASE_FAULT_DETAIL, "code": fault})
         if fault == "invalid_json":
@@ -351,6 +369,31 @@ class FakeSupabaseHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
         return None
+
+
+class RedirectTargetHandler(BaseHTTPRequestHandler):
+    """Where a redirect fault points. Records each request; answers like Supabase for another user."""
+    harness = None
+    scheme = "https"
+
+    def log_message(self, *args):
+        pass
+
+    def _handle(self):
+        self.harness._record_redirect_hit({
+            "scheme": self.scheme, "method": self.command,
+            "authorization": bool(self.headers.get("Authorization")),
+            "apikey": bool(self.headers.get("apikey")),
+        })
+        data = json.dumps({"id": "redirect-target", "aud": "authenticated",
+                           "email": REDIRECT_TARGET_EMAIL}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    do_GET = do_POST = do_HEAD = _handle
 
 
 # ---- the harness -----------------------------------------------------------------------------
@@ -379,6 +422,8 @@ class Harness:
         self.supabase_faults = []
         self.supabase_requests = 0
         self.handler_calls = []
+        self.redirect_hits = []
+        self.redirect_targets = {}
         self._local = threading.local()
         self.clock_value = None
         self.tokens = None
@@ -399,6 +444,13 @@ class Harness:
         ctx.load_cert_chain(cert, key)
         self.supabase.socket = ctx.wrap_socket(self.supabase.socket, server_side=True)
         threading.Thread(target=self.supabase.serve_forever, daemon=True).start()
+        for scheme in ("https", "http"):
+            target = type(f"RedirectTarget_{scheme}", (RedirectTargetHandler,), {"harness": self, "scheme": scheme})
+            server = LoopbackServer(("127.0.0.1", 0), target)
+            if scheme == "https":
+                server.socket = ctx.wrap_socket(server.socket, server_side=True)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.redirect_targets[scheme] = server
         os.environ["SUPABASE_URL"] = f"https://127.0.0.1:{self.supabase.server_address[1]}"
         os.environ["SUPABASE_PUBLISHABLE_KEY"] = FAKE_SUPABASE_KEY
         check_environment(dict(os.environ))  # again, with the harness's own settings in place
@@ -436,6 +488,8 @@ class Harness:
     def info(self):
         out = {"api_url": f"http://127.0.0.1:{self.api.server_address[1]}", "engine": self.engine,
                "allow_origins": self.origins, "tables": list(self.tables)}
+        if self.redirect_targets:
+            out["redirect_target_http"] = f"http://127.0.0.1:{self.redirect_targets['http'].server_address[1]}"
         if self.control:
             out.update({"control_url": f"http://127.0.0.1:{self.control.server_address[1]}",
                         "control_token": self.control_token})
@@ -465,6 +519,7 @@ class Harness:
         with self.lock:
             self.faults, self.requests = [], {}
             self.supabase_faults, self.supabase_requests, self.handler_calls = [], 0, []
+            self.redirect_hits = []
         store = self.store_mod.Store(self.client, *self.tables)
         self.index.configure(self.service_mod.Service(store, self.config_mod.load({}), clock=self._clock,
                                                       new_token=self._new_token))
@@ -489,8 +544,9 @@ class Harness:
             counts = dict(self.requests)
             calls = [dict(c, ddb=list(c["ddb"])) for c in self.handler_calls]
             supabase = self.supabase_requests
+            hits = [dict(h) for h in self.redirect_hits]
         return {"rows": rows, "quota": quotas, "requests": counts, "handler_calls": calls,
-                "supabase_requests": supabase}
+                "supabase_requests": supabase, "redirect_target_requests": hits}
 
     def queue_fault(self, status, count=1):
         if status not in FAULTS or not isinstance(count, int) or not 1 <= count <= 100:
@@ -514,6 +570,10 @@ class Harness:
     def _take_supabase_fault(self):
         with self.lock:
             return self.supabase_faults.pop(0) if self.supabase_faults else None
+
+    def _record_redirect_hit(self, hit):
+        with self.lock:
+            self.redirect_hits.append(hit)
 
     def _count_supabase(self):
         with self.lock:
