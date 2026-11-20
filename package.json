@@ -13,7 +13,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:harness": "M14_HARNESS=1 vitest run src/lib/m14/http-client.harness.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test:e2e": "playwright test",
+    "test:e2e:isolation": "playwright test -c playwright.isolation.config.ts",
+    "lint:regression": "node scripts/eslint-regression.mjs",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.e2e.json --noEmit"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -70,6 +73,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",
+    "@playwright/test": "1.63.0",
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.0.0",
     "@types/node": "^22.16.5",

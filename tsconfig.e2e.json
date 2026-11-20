@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["e2e/**/*.ts", "playwright.config.ts", "playwright.isolation.config.ts"],
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  }
+}

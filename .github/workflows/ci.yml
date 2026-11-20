@@ -1,0 +1,172 @@
+# Phase 3B-D: automatic CI for pull requests to main and pushes to main.
+#
+# Isolation: read-only repository token, no secrets, no OIDC, no deployment and no AWS actions.
+# AWS credentials are the fake value "testing"; every service is local to the runner (DynamoDB
+# Local container, the localhost harness, the Vite dev server). Supabase and the M1 API point at
+# placeholders that never resolve, and the browser blocks every non-local request.
+#
+# Frozen inputs: actions pinned to commit SHAs, DynamoDB Local pinned by digest, bun.lock
+# (--frozen-lockfile), Python test dependencies pinned with hashes (aws/requirements-test.lock),
+# Playwright pinned in bun.lock (its Chromium build follows that version).
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: # re-runs on the same commit (acceptance: three consecutive green runs)
+
+permissions:
+  contents: read
+
+env:
+  AWS_ACCESS_KEY_ID: testing
+  AWS_SECRET_ACCESS_KEY: testing
+  AWS_SESSION_TOKEN: testing
+  AWS_DEFAULT_REGION: ap-southeast-2
+  AWS_EC2_METADATA_DISABLED: "true"
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+  BUN_VERSION: "1.4.4"
+
+jobs:
+  python:
+    name: A · Python tests (moto)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --require-hashes -r aws/requirements-test.lock
+      - name: Full Python suite
+        run: python -m unittest aws/tests/test_*.py
+
+  typescript:
+    name: B · TypeScript, Vitest, ESLint regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: TypeScript (app and e2e)
+        run: bun run typecheck
+      - name: Vitest
+        run: bun run test
+      - name: ESLint — no new findings against scripts/eslint-baseline.json
+        run: node scripts/eslint-regression.mjs
+
+  harness:
+    name: C · Local HTTP harness on DynamoDB Local
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
+        ports: ["8000:8000"]
+    env:
+      DDB_ENDPOINT: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --require-hashes -r aws/requirements-test.lock
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Wait for DynamoDB Local
+        run: for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8000 && break; sleep 1; done
+      - name: API tests, B4 scenarios, shared contract and harness tests (Python) on DynamoDB Local
+        run: >-
+          python -m unittest -v aws/tests/test_m14_subscriptions_api.py
+          aws/tests/test_m14_ddb_scenarios.py aws/tests/test_m14_http_contract.py
+          aws/tests/test_m14_local_harness.py
+      - name: HttpSubscriptionsClient over real HTTP on DynamoDB Local
+        run: bun run test:harness
+
+  e2e:
+    name: D · Playwright E2E (Chromium, DynamoDB Local)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
+        ports: ["8000:8000"]
+    env:
+      DDB_ENDPOINT: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --require-hashes -r aws/requirements-test.lock
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Install Chromium for the pinned Playwright version
+        run: bunx playwright install --with-deps chromium
+      - name: Wait for DynamoDB Local
+        run: for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8000 && break; sleep 1; done
+      - name: Playwright end-to-end tests
+        run: bun run test:e2e
+      - name: Upload traces and screenshots (failures only; fake test data only)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-test-results
+          path: test-results/
+          retention-days: 7
+
+  isolation:
+    name: E · Production and Preview bundle isolation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: Bundle scans (every HTTP-mode variable set, plus a forced-on control build)
+        run: bunx vitest run src/test/production-bundle.test.ts
+      - name: Install Chromium for the pinned Playwright version
+        run: bunx playwright install --with-deps chromium
+      - name: Production and Preview builds in Chromium
+        run: bun run test:e2e:isolation
+      - name: Upload traces and screenshots (failures only)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: isolation-test-results
+          path: test-results/
+          retention-days: 7

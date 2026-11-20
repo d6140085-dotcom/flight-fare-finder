@@ -244,15 +244,32 @@ class ExclusionTests(unittest.TestCase):
                 self.assertNotIn("local_api", path.read_text(encoding="utf-8"), path)
                 self.assertNotIn("aws/tools", path.read_text(encoding="utf-8"), path)
 
-    def test_no_automatic_workflow_runs_it(self):
+    def test_workflows_that_run_it_cannot_reach_or_deploy_anything(self):
+        """Phase 3B-D runs the harness in automatic CI. Any workflow that does must be read-only,
+        secret-free and deployment-free, with fake AWS credentials and no pull_request_target."""
+        runners = []
         for wf in (ROOT / ".github" / "workflows").glob("*.y*ml"):
             text = wf.read_text(encoding="utf-8")
-            if "local_api" in text or "local_harness" in text or "test:harness" in text:
-                self.assertRegex(text, r"(?m)^on:\s*\n\s+workflow_dispatch:\s*$", wf)
-                self.assertNotRegex(text, r"(?m)^\s+(push|pull_request|schedule|workflow_run):", wf)
+            if not ("local_api" in text or "local_harness" in text or "test:harness" in text
+                    or "test:e2e" in text):
+                continue
+            runners.append(wf.name)
+            with self.subTest(wf.name):
+                self.assertRegex(text, r"(?m)^permissions:\s*\n\s+contents: read\s*$")
+                self.assertNotRegex(text, r"(?m)^\s+(?!contents)[a-z-]+: write\s*$")
+                self.assertNotIn("pull_request_target", text)
                 self.assertNotIn("secrets.", text)
                 self.assertNotIn("id-token", text)
                 self.assertNotIn("aws-actions/", text)
+                self.assertNotRegex(text, r"(?i)\b(vercel deploy|cloudformation deploy|sam deploy|cdk deploy|"
+                                          r"aws (lambda|cloudformation|iam|ssm|dynamodb|apigateway|events)\b)")
+                for value in re.findall(r"(?m)^\s+AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN): (\S+)", text):
+                    self.assertEqual(value, "testing")
+                for endpoint in re.findall(r"(?m)DDB_ENDPOINT: (\S+)", text):
+                    self.assertTrue(local_api._is_loopback_url(endpoint), endpoint)
+                for uses in re.findall(r"(?m)uses: ([^\s#]+)", text):
+                    self.assertRegex(uses, r"@[0-9a-f]{40}$", f"{uses} must be pinned to a commit SHA")
+        self.assertIn("ci.yml", runners)
 
 
 # =================================================================================================
