@@ -11,10 +11,15 @@ No test reaches AWS: endpoints are localhost-only and credentials are fake.
 Run: python3 -m unittest discover -s aws/tests -v
 """
 import base64
+import contextlib
+import http.client
 import importlib.util
 import io
 import json
 import os
+import re
+import socket
+import ssl
 import sys
 import threading
 import time
@@ -32,7 +37,7 @@ API_DIR = Path(__file__).resolve().parents[1] / "lambdas" / "flight-subscription
 sys.path.insert(0, str(API_DIR))
 from subsapi import config as config_mod  # noqa: E402
 from subsapi import months, subkeys, validation  # noqa: E402
-from subsapi.auth import resolve_email  # noqa: E402
+from subsapi.auth import AuthUnavailable, resolve_email  # noqa: E402
 from subsapi.errors import ApiError  # noqa: E402
 from subsapi.messages import message  # noqa: E402
 
@@ -256,6 +261,131 @@ class AuthTests(unittest.TestCase):
         for bad in ({**ENV, "SUPABASE_PUBLISHABLE_KEY": "sb_secret_x"}, {**ENV, "SUPABASE_URL": "http://x"}):
             with self.assertRaises(RuntimeError):
                 resolve_email(apigw("GET /subscriptions"), bad, lambda r, timeout: None)
+
+
+class SlowBody(FakeResponse):
+    """A 200 whose body fails while being read (the connection dies mid-response)."""
+
+    def __init__(self, exc):
+        super().__init__(b"")
+        self.exc = exc
+
+    def read(self, *a):
+        raise self.exc
+
+
+SECRET_TOKEN = "secret-token-3be"
+SUPABASE_DETAIL = b'{"code": 503, "msg": "upstream db-7 at 10.0.0.9 is down", "email": "user@example.com"}'
+REASON = re.compile(r"^[a-z0-9_]+$")
+
+
+class AuthClassificationTests(unittest.TestCase):
+    """Phase 3B-E: Supabase's answer -> the email (200), None (401) or AuthUnavailable (503)."""
+
+    def resolve(self, opener, token=SECRET_TOKEN):
+        return resolve_email(apigw("GET /subscriptions", {"email": OTHER}, token=token), ENV, opener)
+
+    @staticmethod
+    def status(code, body=SUPABASE_DETAIL):
+        def opener(req, timeout):
+            raise urllib.error.HTTPError(req.full_url, code, "error", {}, io.BytesIO(body))
+        return opener
+
+    @staticmethod
+    def raises(exc):
+        def opener(req, timeout):
+            raise exc
+        return opener
+
+    @staticmethod
+    def answer(body, status=200):
+        def opener(req, timeout):
+            r = FakeResponse(body)
+            r.status = status
+            return r
+        return opener
+
+    def unavailable(self, opener, reason):
+        with self.assertRaises(AuthUnavailable) as cm:
+            self.resolve(opener)
+        self.assertEqual(cm.exception.reason, reason)
+        self.assertRegex(str(cm.exception), REASON)  # a fixed label: no token, email or Supabase text
+        self.assertIsNone(cm.exception.__cause__)
+        return cm.exception
+
+    def test_valid_token(self):
+        self.assertEqual(self.resolve(self.answer(b'{"email": "User@Example.com", "aud": "authenticated"}')), USER)
+
+    def test_missing_token_makes_no_request(self):
+        def never(req, timeout):
+            raise AssertionError("Supabase must not be called without a bearer token")
+
+        for token in (None, "", " "):
+            self.assertIsNone(self.resolve(never, token=token), token)
+        for header in ("Basic dXNlcjpwdw==", "Bearer", "Bearer   ", "token abc"):
+            event = apigw("GET /subscriptions", token=None)
+            event["headers"] = {"Authorization": header}
+            self.assertIsNone(resolve_email(event, ENV, never), header)
+
+    def test_invalid_and_expired_tokens_are_401(self):
+        for code in (400, 401, 403):  # malformed, invalid/expired JWT, user gone or session revoked
+            self.assertIsNone(self.resolve(self.status(code)), code)
+        # Supabase's own wording for an expired token, for completeness.
+        expired = b'{"code": 403, "error_code": "bad_jwt", "msg": "invalid JWT: token is expired"}'
+        self.assertIsNone(self.resolve(self.status(403, expired)))
+        for body in (b'{"id": "x"}', b'{"email": null}', b'{"email": ""}', b'{"email": 7}'):
+            self.assertIsNone(self.resolve(self.answer(body)), body)  # a user without a usable email
+
+    def test_temporary_statuses_are_503(self):
+        for code in (408, 429, 500, 502, 503, 504):
+            self.unavailable(self.status(code), f"http_{code}")
+
+    def test_unexpected_statuses_fail_closed_as_503(self):
+        for code in (404, 405, 409, 410, 422, 451):
+            self.unavailable(self.status(code), f"unexpected_http_{code}")
+        for code in (201, 204, 206):  # an opener that does not raise for non-200 answers
+            self.unavailable(self.answer(b'{"email": "user@example.com"}', status=code), f"unexpected_http_{code}")
+
+    def test_timeouts(self):
+        self.unavailable(self.raises(urllib.error.URLError(TimeoutError("timed out"))), "timeout")
+        self.unavailable(self.raises(urllib.error.URLError(socket.timeout("timed out"))), "timeout")
+        self.unavailable(self.raises(TimeoutError("The read operation timed out")), "timeout")
+        self.unavailable(lambda r, timeout: SlowBody(TimeoutError("The read operation timed out")), "timeout")
+
+    def test_dns_failures(self):
+        self.unavailable(self.raises(urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))), "dns")
+        self.unavailable(self.raises(urllib.error.URLError(socket.gaierror(-3, "Temporary failure"))), "dns")
+
+    def test_tls_failures(self):
+        cert = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        self.unavailable(self.raises(urllib.error.URLError(cert)), "tls")
+        self.unavailable(self.raises(urllib.error.URLError(ssl.SSLError(1, "handshake failure"))), "tls")
+        self.unavailable(self.raises(ssl.SSLEOFError(8, "EOF occurred in violation of protocol")), "tls")
+
+    def test_connection_failures(self):
+        self.unavailable(self.raises(ConnectionResetError(104, "Connection reset by peer")), "connection")
+        self.unavailable(self.raises(urllib.error.URLError(ConnectionRefusedError(111, "refused"))), "connection")
+        self.unavailable(self.raises(http.client.RemoteDisconnected("closed without response")), "connection")
+        self.unavailable(self.raises(urllib.error.URLError("no host given")), "connection")
+        self.unavailable(lambda r, timeout: SlowBody(ConnectionResetError(104, "reset")), "connection")
+        self.unavailable(lambda r, timeout: SlowBody(http.client.IncompleteRead(b'{"em')), "connection")
+
+    def test_undecodable_success_is_503(self):
+        for body in (b"<html>maintenance</html>", b"", b"\xff\xfe\x00", b'{"email": "user@exa', b"[]",
+                     b'"user@example.com"', b"null", b"42"):
+            self.unavailable(self.answer(body), "invalid_response")
+
+    def test_missing_configuration_is_still_a_500(self):
+        for env in ({}, {"SUPABASE_URL": ENV["SUPABASE_URL"]}, {"SUPABASE_PUBLISHABLE_KEY": "sb_publishable_x"},
+                    {**ENV, "SUPABASE_URL": ""}, {**ENV, "SUPABASE_PUBLISHABLE_KEY": "sb_secret_x"}):
+            with self.assertRaises(RuntimeError):
+                resolve_email(apigw("GET /subscriptions"), env, self.answer(b'{"email": "user@example.com"}'))
+
+    def test_programming_errors_are_not_swallowed(self):
+        """No catch-all: an error that is not a Supabase answer or a network failure propagates (500)."""
+        for exc in (TypeError("bug"), KeyError("bug"), AttributeError("bug")):
+            with self.assertRaises(type(exc)):
+                self.resolve(self.raises(exc))
 
 
 class SourceHygieneTests(unittest.TestCase):
@@ -985,6 +1115,166 @@ class HandlerSecurityTests(LocalDynamoTestCase):
         self.assertEqual(status, 201)
         self.assertEqual(self.raw(OTHER), theirs)
         self.assertEqual(sorted(self.raw(USER)), [fkey("LON")])
+
+
+def _raise(exc):
+    raise exc
+
+
+def _supabase_status(code):
+    return lambda req: _raise(urllib.error.HTTPError(req.full_url, code, "x", {}, io.BytesIO(SUPABASE_DETAIL)))
+
+
+class AuthOutageHandlerTests(LocalDynamoTestCase):
+    """Phase 3B-E: the real resolve_email behind the real handler while Supabase is failing.
+
+    The caller is unknown, so the answer is 503 auth_unavailable on every route (the legacy
+    POST /subscribe too), with no DynamoDB call at all, no change to rows or quota records, and
+    no token, email or Supabase text in the response or the logs."""
+
+    FAILURES = {
+        "http_408": _supabase_status(408),
+        "http_429": _supabase_status(429),
+        "http_500": _supabase_status(500),
+        "http_502": _supabase_status(502),
+        "http_503": _supabase_status(503),
+        "http_504": _supabase_status(504),
+        "timeout": lambda req: _raise(urllib.error.URLError(TimeoutError("timed out"))),
+        "dns": lambda req: _raise(urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))),
+        "tls": lambda req: _raise(urllib.error.URLError(ssl.SSLCertVerificationError(1, "verify failed"))),
+        "connection": lambda req: _raise(ConnectionResetError(104, "Connection reset by peer")),
+        "invalid_response": lambda req: FakeResponse(b"<html>maintenance user@example.com</html>"),
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.auth.stop()
+        self.quiet.stop()
+        import functools
+        from subsapi import auth as auth_mod
+
+        self.failure = None
+        self.supabase_calls = 0
+
+        def supabase(req, timeout):
+            self.supabase_calls += 1
+            if self.failure:
+                return self.FAILURES[self.failure](req)
+            token = req.headers.get("Authorization", "")[7:]
+            if token not in TOKENS:
+                raise urllib.error.HTTPError(req.full_url, 401, "invalid JWT", {}, io.BytesIO(SUPABASE_DETAIL))
+            return FakeResponse(json.dumps({"email": TOKENS[token], "aud": "authenticated"}).encode())
+
+        self.auth = mock.patch.object(self.index, "resolve_email",
+                                      functools.partial(auth_mod.resolve_email, opener=supabase))
+        self.auth.start()
+        self.env = mock.patch.dict(os.environ, ENV)
+        self.env.start()
+        self.ddb_ops = []
+        self.client.meta.events.register("before-call.dynamodb", self._record)
+
+    def _record(self, model, **kw):
+        self.ddb_ops.append(model.name)
+
+    def tearDown(self):
+        self.client.meta.events.unregister("before-call.dynamodb", self._record)
+        self.env.stop()
+        super().tearDown()
+
+    def handle(self, route_key, body=None, token="good", path=None, query=None):
+        """Calls the handler; returns (response, parsed body, log text, DynamoDB operations)."""
+        self.ddb_ops = []
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            r = self.index.handler(apigw(route_key, body, token=token, path=path, query=query), None)
+        return r, (json.loads(r["body"]) if r.get("body") else None), out.getvalue(), list(self.ddb_ops)
+
+    def seed_user(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.create("LON")[0], 201)  # a row and a quota record
+        self.seed(OTHER, fkey("PAR"), departure_month="2027-01")
+        return self.raw(), self.quota(), self.raw(OTHER)
+
+    def test_every_route_answers_503_without_touching_dynamodb(self):
+        rows, quota, theirs = self.seed_user()
+        version = self.current_version(fid("LON"))
+        routes = [("GET /subscriptions", None, None, None),
+                  ("POST /subscriptions", {"origin": "TPE", "destination": "OSA", "departure_month": "2027-02",
+                                           "target_price": 1, "email": OTHER}, None, None),
+                  ("PATCH /subscriptions/{id}", {"target_price": 1, "if_version": version}, {"id": fid("LON")}, None),
+                  ("PATCH /subscriptions/{route}", {"target_price": 1, "if_version": version},
+                   {"route": fid("LON")}, None),
+                  ("DELETE /subscriptions/{id}", None, {"id": fid("LON")}, {"if_version": version}),
+                  ("DELETE /subscriptions/{route}", None, {"route": fid("LON")}, {"if_version": version}),
+                  ("POST /subscribe", {"plan_name": "tokyo", "target_price": 1, "email": OTHER}, None, None)]
+        expected_message = message("auth_unavailable", CFG, NOW)
+        self.assertIn("暫時無法使用", expected_message)
+        for failure in self.FAILURES:
+            self.failure = failure
+            for key, body, path, query in routes:
+                with self.subTest(failure=failure, route=key):
+                    calls = self.supabase_calls
+                    r, out, logs, ops = self.handle(key, body, token=SECRET_TOKEN, path=path, query=query)
+                    self.assertEqual(r["statusCode"], 503)
+                    self.assertEqual(out, {"error": "auth_unavailable", "message": expected_message})
+                    self.assertEqual(r["headers"].get("Retry-After"), "5")
+                    self.assertFalse([h for h in r["headers"] if h.lower().startswith("access-control-")],
+                                     "CORS headers belong to API Gateway, not the function")
+                    self.assertEqual(ops, [], "no DynamoDB read or write without a confirmed identity")
+                    self.assertEqual(self.supabase_calls, calls + 1, "Supabase asked once; no retry")
+                    line = json.loads(logs.strip().splitlines()[-1])
+                    self.assertEqual(line, {"route": key, "user": "-", "status": 503, "error": "auth_unavailable",
+                                            "reason": failure})
+                    for secret in (SECRET_TOKEN, USER, OTHER, "10.0.0.9", "maintenance"):
+                        self.assertNotIn(secret, logs)
+                        self.assertNotIn(secret, r["body"])
+        self.assertEqual((self.raw(), self.quota(), self.raw(OTHER)), (rows, quota, theirs))
+
+    def test_invalid_sessions_stay_401_without_touching_dynamodb(self):
+        rows, quota, _ = self.seed_user()
+        for token in (None, "forged", SECRET_TOKEN):
+            with self.subTest(token=token):
+                r, out, logs, ops = self.handle("PATCH /subscriptions/{id}", {"target_price": 1},
+                                                token=token, path={"id": fid("LON")})
+                self.assertEqual((r["statusCode"], out["error"]), (401, "unauthorized"))
+                self.assertNotIn("Retry-After", r["headers"])
+                self.assertEqual(ops, [])
+                self.assertNotIn("secret-token", logs)
+                self.assertNotIn("10.0.0.9", r["body"])
+        self.assertEqual((self.raw(), self.quota()), (rows, quota))
+
+    def test_outage_never_falls_back_to_a_test_or_body_identity(self):
+        self.failure = "http_503"
+        on = {"ALLOW_DIRECT_TEST_INVOKE": "true", "AWS_LAMBDA_FUNCTION_NAME": "flight-subscriptions-api-test"}
+        with mock.patch.dict(os.environ, on):
+            event = apigw("POST /subscriptions", {"origin": "TPE", "destination": "LON", "departure_month": "2027-01",
+                                                  "target_price": 1, "email": USER}, token="good")
+            event["test_email"] = USER
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = self.index.handler(event, None)
+        self.assertEqual(r["statusCode"], 503)
+        self.assertEqual((self.raw(), self.quota()), ({}, None))
+
+    def test_sessions_work_again_once_supabase_recovers(self):
+        self.seed_user()
+        self.failure = "timeout"
+        self.assertEqual(self.handle("GET /subscriptions")[0]["statusCode"], 503)
+        self.failure = None
+        r, out, _, ops = self.handle("GET /subscriptions")
+        self.assertEqual(r["statusCode"], 200)
+        self.assertEqual([s["id"] for s in out["subscriptions"]], [fid("LON")])
+        self.assertTrue(ops)
+
+    def test_unexpected_errors_are_still_500(self):
+        def broken(req, timeout):
+            raise TypeError("bug")
+
+        import functools
+        from subsapi import auth as auth_mod
+        with mock.patch.object(self.index, "resolve_email", functools.partial(auth_mod.resolve_email, opener=broken)):
+            r, out, logs, ops = self.handle("GET /subscriptions")
+        self.assertEqual((r["statusCode"], out["error"]), (500, "internal_error"))
+        self.assertEqual(ops, [])
 
 
 class TransactionShapeTests(LocalDynamoTestCase):

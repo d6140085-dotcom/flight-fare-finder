@@ -188,6 +188,17 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             h.queue_fault(503, count=0)
 
+    def test_supabase_fault_injection_accepts_only_known_faults(self):
+        h = local_api.Harness()
+        for kind in (400, 401, 403, 404, 408, 429, 500, 502, 503, 504, "timeout", "reset", "invalid_json"):
+            h.queue_supabase_fault(kind)
+        for bad in (200, 302, 418, "503", "slow", None, True, 503.0, ["reset"]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                h.queue_supabase_fault(bad)
+        for count in (0, 101, "1", True):
+            with self.assertRaises(ValueError, msg=repr(count)):
+                h.queue_supabase_fault(503, count=count)
+
 
 @unittest.skipUnless(deps_available(), "boto3/cryptography and moto (or DDB_ENDPOINT) not available")
 class StartupRefusalTests(unittest.TestCase):
@@ -639,6 +650,93 @@ class HarnessIntegrationTests(unittest.TestCase):
         status, headers, body, raw = self.http.call(
             "DELETE", f"/subscriptions/{created['id']}?if_version={created['version']}")
         self.assertEqual((status, body, raw, headers.get("content-length")), (204, None, b"", "0"))
+
+    # ---- E2. Supabase outages (Phase 3B-E) ---------------------------------------------------
+    AUTH_ROUTES = [("GET", "/subscriptions", None, "GET /subscriptions"),
+                   ("POST", "/subscriptions", {"origin": "TPE", "destination": "PAR", "departure_month": "2027-04",
+                                               "target_price": 1, "email": "other@example.com"}, "POST /subscriptions"),
+                   ("PATCH", "/subscriptions/TPE-OSA_2027-01", {"target_price": 1}, "PATCH /subscriptions/{id}"),
+                   ("DELETE", "/subscriptions/TPE-OSA_2027-01", None, "DELETE /subscriptions/{id}"),
+                   ("POST", "/subscribe", {"plan_name": "tokyo", "target_price": 1}, "POST /subscribe")]
+
+    def supabase_fault(self, kind, count=1):
+        status, out = self.control("POST", "/supabase-fault", {"kind": kind, "count": count})
+        self.assertEqual(status, 200, out)
+
+    def seeded_with_quota(self):
+        self.reset(rows={"user@example.com": [VECTORS["rows"]["fixed_jan"]],
+                         "other@example.com": [VECTORS["rows"]["other_users_fixed"]]})
+        self.assertEqual(self.create("LON", "2027-03")[0], 201)  # also writes the quota record
+        st = self.state()
+        self.assertEqual(st["quota"]["user@example.com"]["count"], 2)
+        return st
+
+    def auth_request(self, method, path, body, version):
+        if method == "PATCH":
+            body = {**body, "if_version": version}
+        if method == "DELETE":
+            path += "?if_version=" + version
+        return self.http.call(method, path, body, headers={"Origin": ORIGIN})
+
+    def test_supabase_outage_is_503_without_any_dynamodb_call(self):
+        before = self.seeded_with_quota()
+        version = VECTORS["rows"]["fixed_jan"]["version_token"]
+        for kind in (408, 429, 500, 502, 503, 504, "reset", "invalid_json"):
+            for method, path, body, route_key in self.AUTH_ROUTES:
+                with self.subTest(kind=kind, route=route_key):
+                    self.supabase_fault(kind)
+                    asked = self.state()["supabase_requests"]
+                    status, headers, out, raw = self.auth_request(method, path, body, version)
+                    self.assertEqual(status, 503)
+                    self.assertEqual(out["error"], "auth_unavailable")
+                    self.assertIn("暫時無法使用", out["message"])
+                    self.assertEqual(set(out), {"error", "message"})
+                    self.assertEqual(headers.get("retry-after"), "5")
+                    self.assertEqual(headers.get("access-control-allow-origin"), ORIGIN)  # gateway CORS, as for any answer
+                    for leak in (b"10.0.0.9", b"db-7", b"maintenance", b"harness-token-user", b"user@example.com"):
+                        self.assertNotIn(leak, raw)
+                    st = self.state()
+                    self.assertEqual(st["handler_calls"][-1], {"route": route_key, "status": 503, "ddb": []})
+                    self.assertEqual(st["supabase_requests"], asked + 1, "Supabase asked once, no retry")
+        st = self.state()
+        self.assertEqual((st["rows"], st["quota"]), (before["rows"], before["quota"]))
+
+    def test_supabase_timeout_is_503(self):
+        before = self.seeded_with_quota()
+        self.supabase_fault("timeout")
+        status, headers, out, _ = self.http.call("PATCH", "/subscriptions/TPE-OSA_2027-01",
+                                                 {"target_price": 1, "if_version": VECTORS["rows"]["fixed_jan"]["version_token"]},
+                                                 headers={"Origin": ORIGIN})
+        self.assertEqual((status, out["error"], headers.get("access-control-allow-origin")),
+                         (503, "auth_unavailable", ORIGIN))
+        st = self.state()
+        self.assertEqual(st["handler_calls"][-1], {"route": "PATCH /subscriptions/{id}", "status": 503, "ddb": []})
+        self.assertEqual((st["rows"], st["quota"]), (before["rows"], before["quota"]))
+
+    def test_supabase_rejections_stay_401_without_any_dynamodb_call(self):
+        before = self.seeded_with_quota()
+        for kind in (400, 401, 403):
+            with self.subTest(kind=kind):
+                self.supabase_fault(kind)
+                status, headers, out, raw = self.http.call("GET", "/subscriptions", headers={"Origin": ORIGIN})
+                self.assertEqual((status, out["error"]), (401, "unauthorized"))
+                self.assertNotIn("retry-after", headers)
+                self.assertNotIn(b"10.0.0.9", raw)
+                self.assertEqual(self.state()["handler_calls"][-1]["ddb"], [])
+        st = self.state()
+        self.assertEqual((st["rows"], st["quota"]), (before["rows"], before["quota"]))
+
+    def test_session_works_again_after_the_outage(self):
+        self.seeded_with_quota()
+        self.supabase_fault(503, count=2)
+        self.assertEqual(self.http.call("GET", "/subscriptions")[0], 503)
+        self.assertEqual(self.http.call("GET", "/subscriptions")[0], 503)
+        status, _, out, _ = self.http.call("GET", "/subscriptions")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(out["subscriptions"]), 2)
+        calls = self.state()["handler_calls"]
+        self.assertEqual([c["status"] for c in calls[-3:]], [503, 503, 200])
+        self.assertTrue(calls[-1]["ddb"], "the recorder sees DynamoDB calls when there are some")
 
     # ---- F. CORS ----------------------------------------------------------------------------
     def preflight(self, origin, method, headers="authorization,content-type", path="/subscriptions/TPE-OSA_2027-01"):

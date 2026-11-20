@@ -22,7 +22,7 @@ export const NOW = new Date(vectors.now); // 2026-11-05T03:00:00Z: selectable 20
 export const USER = "user@example.com";
 export const ROWS = vectors.rows as unknown as Record<string, Record<string, unknown>>;
 const FAKE_HOST = new URL(FAKE_SUPABASE_URL).hostname;
-const STORAGE_KEY = `sb-${FAKE_HOST.split(".")[0]}-auth-token`;
+export const STORAGE_KEY = `sb-${FAKE_HOST.split(".")[0]}-auth-token`;
 /** Hosts the page may try to reach that are blocked without failing a test (web fonts). */
 const TOLERATED = new Set(["fonts.googleapis.com", "fonts.gstatic.com"]);
 
@@ -30,7 +30,14 @@ export interface HarnessState {
   rows: Record<string, Row[]>;
   quota: Record<string, { count: number; version?: number }>;
   requests: Record<string, number>;
+  /** Every request the function handled: its route key, status and the DynamoDB operations it made. */
+  handler_calls: { route: string; status: number | null; ddb: string[] }[];
+  /** Requests that reached the harness's fake Supabase (the backend's session check). */
+  supabase_requests: number;
 }
+/** Faults the harness's fake Supabase can answer the backend's session check with. */
+export type SupabaseFault =
+  400 | 401 | 403 | 404 | 408 | 429 | 500 | 502 | 503 | 504 | "timeout" | "reset" | "invalid_json";
 export interface Row {
   email: string;
   route: string;
@@ -84,6 +91,10 @@ export class Harness {
   }
   fault(status: 429 | 502 | 503 | 504) {
     return this.call("POST", "/fault", { status });
+  }
+  /** The backend's next `count` session checks get this answer from Supabase. */
+  supabaseFault(kind: SupabaseFault, count = 1) {
+    return this.call("POST", "/supabase-fault", { kind, count });
   }
   async rows(): Promise<Row[]> {
     return (await this.state()).rows[USER] ?? [];

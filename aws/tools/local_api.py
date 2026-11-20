@@ -19,8 +19,10 @@ Vite build, and no workflow deploys it.
 Usage (prints one JSON line with the URLs, then serves until killed):
     python3 aws/tools/local_api.py serve [--control] [--allow-origin ORIGIN ...]
 With ``--control`` a second loopback port accepts test commands (reset/seed the tables, fix the
-clock and version tokens, read the stored state, queue a 429/502/503/504 fault). Every control
-request must carry the random secret printed at startup.
+clock and version tokens, read the stored state, queue a 429/502/503/504 gateway fault, or queue a
+fault in the fake Supabase that the auth code calls). Every control request must carry the random
+secret printed at startup. ``/state`` also reports, per request the function handled, which
+DynamoDB operations it made, and how many requests reached the fake Supabase.
 """
 import argparse
 import base64
@@ -32,6 +34,8 @@ import json
 import os
 import re
 import secrets
+import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -52,12 +56,22 @@ PRODUCTION_TABLES = {"subscriptions", "subscription_quota", "notification_histor
 FAKE_AWS = {"AWS_ACCESS_KEY_ID": "testing", "AWS_SECRET_ACCESS_KEY": "testing", "AWS_SESSION_TOKEN": "testing"}
 FAKE_SUPABASE_KEY = "sb_publishable_harness_local_only"
 MAX_REQUEST_BYTES = 1024 * 1024  # larger bodies get the gateway's 413 (the handler itself allows 4 KiB)
+MAX_DRAIN_BYTES = 16 * 1024 * 1024  # an oversized body is read and discarded up to this size
 FAULTS = {
     429: {"message": "Too Many Requests"},
     502: {"message": "Internal Server Error"},
     503: {"message": "Service Unavailable"},
     504: {"message": "Endpoint request timed out"},
 }
+# Faults the fake Supabase /auth/v1/user can answer with (Phase 3B-E). Statuses are answered with a
+# body that must never reach the API's response or logs; "timeout" answers only after the auth
+# code's 5 s timeout; "reset" drops the connection with a TCP reset; "invalid_json" is a 200 that
+# is not JSON.
+SUPABASE_FAULT_STATUSES = (400, 401, 403, 404, 408, 429, 500, 502, 503, 504)
+SUPABASE_FAULT_KINDS = ("timeout", "reset", "invalid_json")
+SUPABASE_FAULT_DETAIL = {"code": 0, "msg": "harness fault: upstream db-7 at 10.0.0.9 is unavailable"}
+SUPABASE_TIMEOUT_DELAY = 6.0
+MAX_HANDLER_CALLS = 500
 # The planned M1.4 routes (contract §4, staged B3 cutover). {id} is one path segment.
 ROUTES = {
     ("GET", "/subscriptions"),
@@ -293,6 +307,12 @@ class FakeSupabaseHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        harness = getattr(self, "harness", None)
+        if harness is not None:
+            harness._count_supabase()
+            fault = harness._take_supabase_fault()
+            if fault is not None:
+                return self._fault(fault)
         if self.path != "/auth/v1/user":
             return self._send(404, {"message": "no route"})
         if self.headers.get("apikey") != FAKE_SUPABASE_KEY:
@@ -308,6 +328,29 @@ class FakeSupabaseHandler(BaseHTTPRequestHandler):
                                     "msg": "invalid JWT: token has invalid claims: token is expired"})
         return self._send(200, {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, email)), "aud": "authenticated",
                                 "role": "authenticated", "email": email})
+
+    def _fault(self, fault):
+        self.close_connection = True
+        if isinstance(fault, int):
+            return self._send(fault, {**SUPABASE_FAULT_DETAIL, "code": fault})
+        if fault == "invalid_json":
+            data = b"<html><body>maintenance (user@example.com)</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return None
+        if fault == "timeout":
+            time.sleep(SUPABASE_TIMEOUT_DELAY)  # the caller has given up by now; then just close
+            return None
+        # "reset": abortive close (SO_LINGER 0) sends a TCP RST instead of a response.
+        try:
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            self.connection.close()
+        except OSError:
+            pass
+        return None
 
 
 # ---- the harness -----------------------------------------------------------------------------
@@ -333,6 +376,10 @@ class Harness:
         self.lock = threading.Lock()
         self.faults = []
         self.requests = {}
+        self.supabase_faults = []
+        self.supabase_requests = 0
+        self.handler_calls = []
+        self._local = threading.local()
         self.clock_value = None
         self.tokens = None
         self.tables = None
@@ -346,7 +393,8 @@ class Harness:
 
         import ssl
 
-        self.supabase = LoopbackServer(("127.0.0.1", 0), FakeSupabaseHandler)
+        fake = type("HarnessFakeSupabase", (FakeSupabaseHandler,), {"harness": self})
+        self.supabase = LoopbackServer(("127.0.0.1", 0), fake)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert, key)
         self.supabase.socket = ctx.wrap_socket(self.supabase.socket, server_side=True)
@@ -366,6 +414,7 @@ class Harness:
         self.client = ddb_local.client()
         if (urlparse(self.client.meta.endpoint_url).hostname or "") not in LOOPBACK_HOSTS:
             raise Refused("DynamoDB endpoint is not localhost")
+        self.client.meta.events.register("before-call.dynamodb", self._record_ddb)
         spec = importlib.util.spec_from_file_location("flight_subscriptions_api_index_harness", API_DIR / "index.py")
         self.index = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.index)
@@ -415,6 +464,7 @@ class Harness:
         self.tokens = list(new_tokens) if new_tokens is not None else None
         with self.lock:
             self.faults, self.requests = [], {}
+            self.supabase_faults, self.supabase_requests, self.handler_calls = [], 0, []
         store = self.store_mod.Store(self.client, *self.tables)
         self.index.configure(self.service_mod.Service(store, self.config_mod.load({}), clock=self._clock,
                                                       new_token=self._new_token))
@@ -437,7 +487,10 @@ class Harness:
             v.sort(key=lambda r: r["route"])
         with self.lock:
             counts = dict(self.requests)
-        return {"rows": rows, "quota": quotas, "requests": counts}
+            calls = [dict(c, ddb=list(c["ddb"])) for c in self.handler_calls]
+            supabase = self.supabase_requests
+        return {"rows": rows, "quota": quotas, "requests": counts, "handler_calls": calls,
+                "supabase_requests": supabase}
 
     def queue_fault(self, status, count=1):
         if status not in FAULTS or not isinstance(count, int) or not 1 <= count <= 100:
@@ -448,6 +501,42 @@ class Harness:
     def _take_fault(self):
         with self.lock:
             return self.faults.pop(0) if self.faults else None
+
+    def queue_supabase_fault(self, kind, count=1):
+        ok = (kind in SUPABASE_FAULT_STATUSES and type(kind) is int) or (
+            isinstance(kind, str) and kind in SUPABASE_FAULT_KINDS)
+        if not ok or not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 100:
+            raise ValueError("supabase fault must be one of %s or %s, count 1-100"
+                             % (list(SUPABASE_FAULT_STATUSES), list(SUPABASE_FAULT_KINDS)))
+        with self.lock:
+            self.supabase_faults.extend([kind] * count)
+
+    def _take_supabase_fault(self):
+        with self.lock:
+            return self.supabase_faults.pop(0) if self.supabase_faults else None
+
+    def _count_supabase(self):
+        with self.lock:
+            self.supabase_requests += 1
+
+    def _record_ddb(self, model, **kwargs):
+        """Records DynamoDB operations made while the function handles a request (this thread)."""
+        ops = getattr(self._local, "ops", None)
+        if ops is not None:
+            ops.append(model.name)
+
+    def _invoke(self, route_key, event):
+        self._local.ops = []
+        status = None
+        try:
+            resp = self.index.handler(event, None)
+            status = int(resp["statusCode"])
+            return resp
+        finally:
+            ops, self._local.ops = self._local.ops, None
+            with self.lock:
+                self.handler_calls.append({"route": route_key, "status": status, "ddb": ops})
+                del self.handler_calls[:-MAX_HANDLER_CALLS]
 
     def _count(self, key):
         with self.lock:
@@ -480,6 +569,14 @@ class Harness:
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > MAX_REQUEST_BYTES:
                     self.close_connection = True
+                    # Like the gateway, take the whole request before answering. Closing while the
+                    # client is still sending made it fail with EPIPE before it could read the 413.
+                    remaining = min(length, MAX_DRAIN_BYTES)
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(65536, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
                     cors = cors_headers(harness.cors, harness.origins, origin)
                     return self._reply(413, {"message": "Request Entity Too Large"},
                                        {"Content-Type": "application/json", **cors})
@@ -500,7 +597,7 @@ class Harness:
                     return self._reply(404, {"message": "Not Found"}, {"Content-Type": "application/json", **cors})
                 event = to_event(self.command, raw_path, raw_query, self.headers.items(), body, *route)
                 try:
-                    resp = harness.index.handler(event, None)
+                    resp = harness._invoke(route[0], event)
                     status = int(resp["statusCode"])
                     out = resp.get("body")
                     if out is not None and resp.get("isBase64Encoded"):
@@ -555,6 +652,9 @@ class Harness:
                         return self._reply(200, {"tables": list(harness.tables)})
                     if self.path == "/fault":
                         harness.queue_fault(body.get("status"), body.get("count", 1))
+                        return self._reply(200, {"queued": True})
+                    if self.path == "/supabase-fault":
+                        harness.queue_supabase_fault(body.get("kind"), body.get("count", 1))
                         return self._reply(200, {"queued": True})
                 except (ValueError, Refused) as e:
                     return self._reply(400, {"error": str(e)})
