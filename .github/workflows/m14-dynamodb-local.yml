@@ -1,6 +1,7 @@
-# M1.4 B4: run the subscriptions API tests and the concurrency scenarios against Amazon
-# DynamoDB Local (a Docker container on the GitHub runner). No AWS account, no AWS credentials,
-# no network access to AWS: fake keys and a localhost endpoint only.
+# M1.4 B4 and Phase 3B-B: run the subscriptions API tests, the concurrency scenarios, the shared
+# HTTP contract examples and the local HTTP harness tests (real HTTP -> real handler) against
+# Amazon DynamoDB Local (a Docker container on the GitHub runner). No AWS account, no AWS
+# credentials, no network access to AWS: fake keys and a localhost endpoint only.
 # Manual only (Actions tab -> "M1.4 DynamoDB Local tests" -> Run workflow); never runs on push/PR.
 name: M1.4 DynamoDB Local tests
 on:
@@ -31,3 +32,14 @@ jobs:
         run: for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8000 && break; sleep 1; done
       - name: API tests + B4 scenarios + HTTP contract examples on DynamoDB Local
         run: python -m unittest -v aws/tests/test_m14_subscriptions_api.py aws/tests/test_m14_ddb_scenarios.py aws/tests/test_m14_http_contract.py
+      - name: Local HTTP harness (Python) on DynamoDB Local
+        run: python -m unittest -v aws/tests/test_m14_local_harness.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile  # the repository's lock file is bun.lock
+      - name: HttpSubscriptionsClient over real HTTP (harness) on DynamoDB Local
+        run: npm run test:harness

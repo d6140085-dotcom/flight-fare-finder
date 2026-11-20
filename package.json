@@ -12,6 +12,7 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:harness": "M14_HARNESS=1 vitest run src/lib/m14/http-client.harness.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
