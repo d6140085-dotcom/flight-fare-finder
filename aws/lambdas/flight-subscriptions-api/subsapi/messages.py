@@ -36,6 +36,7 @@ def message(code, cfg, now, details=None):
         "unknown_field": "包含不支援的欄位。",
         "invalid_plan": "不支援的方案。",
         "unauthorized": "請先登入。",
+        "auth_unavailable": "登入驗證服務暫時無法使用，這次操作沒有任何變更，請稍後再試。",
         "not_found": "找不到這筆訂閱，可能已被刪除。",
         "limit_reached": f"每位使用者最多 {cfg.max_subscriptions} 筆航線訂閱（已暫停與已過期的訂閱也算在內），請先刪除不需要的訂閱。",
         "conflict": "這筆訂閱剛剛被其他操作變更了，請重新整理後再試一次。",

@@ -15,11 +15,12 @@ import json
 import os
 
 from subsapi import config as config_mod
-from subsapi.auth import resolve_email
+from subsapi.auth import AuthUnavailable, resolve_email
 from subsapi.errors import ApiError
 from subsapi.messages import message
 
 MAX_BODY_BYTES = 4096
+AUTH_RETRY_AFTER_SECONDS = "5"  # 503 auth_unavailable: Supabase could not confirm the session
 _service = None
 
 
@@ -70,9 +71,12 @@ def _body(event):
         raise ApiError(400, "invalid_json") from None
 
 
-def _log(event, user, status, code=None):
+def _log(event, user, status, code=None, reason=None):
     who = hashlib.sha256(user.encode()).hexdigest()[:12] if user else "-"
-    print(json.dumps({"route": event.get("routeKey"), "user": who, "status": status, "error": code}))
+    line = {"route": event.get("routeKey"), "user": who, "status": status, "error": code}
+    if reason:
+        line["reason"] = reason  # a fixed label (subsapi.auth.AuthUnavailable), never request data
+    print(json.dumps(line))
 
 
 def handler(event, context):
@@ -101,6 +105,15 @@ def handler(event, context):
             raise ApiError(404, "not_found_route")
         _log(event, email, status)
         return _resp(status, body)
+    except AuthUnavailable as e:
+        # Supabase could not confirm the session (outage, timeout, rate limit, unreadable answer).
+        # Nothing was read or written: the caller is unknown, so this is not a 401 (the session
+        # may be perfectly valid) and never a guessed identity. CORS stays with API Gateway.
+        _log(event, None, 503, "auth_unavailable", e.reason)
+        out = _resp(503, {"error": "auth_unavailable",
+                          "message": message("auth_unavailable", svc.cfg, svc.clock())})
+        out["headers"]["Retry-After"] = AUTH_RETRY_AFTER_SECONDS
+        return out
     except ApiError as e:
         _log(event, email, e.status, e.code)
         out = {"error": e.code, "message": message(e.code, svc.cfg, svc.clock(), e.details)}
