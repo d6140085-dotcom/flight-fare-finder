@@ -24,7 +24,20 @@ sys.path.insert(0, str(AWS / "lambdas" / "flight-fare-notification-v2"))
 from notify2 import config, months, searchlinks as sl, service  # noqa: E402
 
 MATRIX = json.loads((HERE / "vectors" / "search-links-matrix.json").read_text(encoding="utf-8"))
-CFG = sl.load_config()
+# The shipped config (aws/config/search-platforms.json) has Trip.com enabled:false since B6-2B,
+# pending an authorized affiliate integration. Its link-builder code is kept, so these tests still
+# exercise it through CFG: the shipped config with ONLY Trip.com switched back on, as if it were
+# authorized. Nothing ships with this fixture. SHIPPED is the real config; ShippedConfigTests pins it.
+SHIPPED = sl.load_config()
+
+
+def as_if_tripcom_authorized(cfg):
+    c = copy.deepcopy(cfg)
+    next(p for p in c["platforms"] if p["id"] == "tripcom")["enabled"] = True
+    return c
+
+
+CFG = as_if_tripcom_authorized(SHIPPED)
 CAT = sl.load_catalog()
 
 
@@ -32,8 +45,8 @@ def instant(text):
     return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
-def config_for(case):
-    cfg = copy.deepcopy(CFG)
+def config_for(case, base=None):
+    cfg = copy.deepcopy(CFG if base is None else base)
     for p in cfg["platforms"]:
         if p["id"] in case.get("disable", []):
             p["enabled"] = False
@@ -42,11 +55,11 @@ def config_for(case):
     return cfg
 
 
-def run(case):
+def run(case, base=None):
     now = instant(case["now"])
     marker = case["marker"] if "marker" in case else MATRIX["default_marker"]
     return sl.build(case["origin"], case["destination"], case["depart_date"], case["return_date"],
-                    months.today(now), catalog=CAT, config=config_for(case), marker=marker,
+                    months.today(now), catalog=CAT, config=config_for(case, base), marker=marker,
                     month=case.get("month"))
 
 
@@ -90,6 +103,18 @@ class MatrixTests(unittest.TestCase):
                 with self.subTest(c["id"]):
                     self.assertEqual(months.effective_month(c["subscription"]["departure_month"], instant(c["now"])),
                                      c["month"])
+
+    def test_every_case_with_the_shipped_config(self):
+        """B6-2B: the shipped config gives exactly the expected outcome without Trip.com."""
+        for c in MATRIX["cases"]:
+            with self.subTest(c["id"]):
+                ls = run(c, base=SHIPPED)
+                exp = c["expect"]
+                self.assertEqual(ls.compliant, exp["compliant"])
+                self.assertEqual(ls.itinerary_valid, exp["itinerary_valid"])
+                self.assertEqual(list(ls.reasons), exp["reasons"])
+                self.assertEqual([[link.platform, link.kind] for link in ls.links],
+                                 [pk for pk in exp["links"] if pk[0] != "tripcom"])
 
     def test_every_case(self):
         for c in MATRIX["cases"]:

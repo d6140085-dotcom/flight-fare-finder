@@ -22,6 +22,10 @@ sys.path.insert(0, str(HERE.parent / "tools"))
 import b6_link_checklist as tool  # noqa: E402
 
 TODAY = date(2026, 11, 23)
+# The shipped config with only Trip.com switched back on, as if authorized (B6-2B): keeps the
+# Trip.com classification tests meaningful while the shipped config has it disabled.
+AUTHORIZED = tool.sl.load_config()
+next(p for p in AUTHORIZED["platforms"] if p["id"] == "tripcom")["enabled"] = True
 
 
 def generate(**kw):
@@ -62,7 +66,9 @@ class ChecklistTests(unittest.TestCase):
                 self.assertTrue(line.endswith("affiliate attribution NOT VERIFIED"), line)
 
     def test_three_route_classes(self):
-        text = generate(origins=["TPE", "KHH", "RMQ"], destinations=["TYO", "OKA", "LON"], month_offsets=[1])
+        # Trip.com is disabled in the shipped config (B6-2B); classify it as if it were authorized.
+        text = generate(origins=["TPE", "KHH", "RMQ"], destinations=["TYO", "OKA", "LON"], month_offsets=[1],
+                        cfg=AUTHORIZED)
         blocks = {b.split("\n", 1)[0]: b for b in text.split("### ")[1:]}
 
         def status(o, d, platform):
@@ -130,7 +136,18 @@ class ChecklistTests(unittest.TestCase):
 
     def test_only_allowed_hosts(self):
         hosts = set(re.findall(r"https://([^/\s?]+)", generate()))
+        self.assertEqual(hosts, {"www.skyscanner.com.tw", "www.aviasales.com", "www.google.com"})   # B6-2B
+        hosts = set(re.findall(r"https://([^/\s?]+)", generate(cfg=AUTHORIZED)))
         self.assertEqual(hosts, {"www.skyscanner.com.tw", "tw.trip.com", "www.aviasales.com", "www.google.com"})
+
+    def test_disabled_tripcom_is_not_listed_and_is_named(self):
+        """B6-2B: with the shipped config, Trip.com rows are absent and the header says why."""
+        text = generate()
+        self.assertNotIn("**tripcom**", text)
+        self.assertNotIn("trip.com/", text)
+        self.assertIn("**Not listed (disabled in search-platforms.json): Trip.com.** Don't open their", text)
+        self.assertIn("**skyscanner**", text)
+        self.assertNotIn("Not listed", generate(cfg=AUTHORIZED))
 
     def test_unsupported_code_is_reported_not_linked(self):
         text = generate(origins=["TSA"], destinations=["TYO"], month_offsets=[1])

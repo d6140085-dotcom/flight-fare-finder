@@ -33,8 +33,14 @@ interface MatrixCase {
 
 const CASES = matrix.cases as MatrixCase[];
 
-const platformsFor = (c: MatrixCase) =>
-  PLATFORMS.map((p) => ({
+// B6-2B: Trip.com is disabled in the shipped config; the expectations cover it as if authorized.
+const AS_IF_AUTHORIZED = PLATFORMS.map((p) => (p.id === "tripcom" ? { ...p, enabled: true } : p));
+
+const platformsFor = (
+  c: MatrixCase,
+  base: readonly (typeof PLATFORMS)[number][] = AS_IF_AUTHORIZED,
+) =>
+  base.map((p) => ({
     ...p,
     enabled: c.disable?.includes(p.id) ? false : p.enabled,
     verified_codes: c.unverify?.includes(p.id) ? { codes: [] as string[] } : p.verified_codes,
@@ -42,14 +48,14 @@ const platformsFor = (c: MatrixCase) =>
 
 const markerOf = (c: MatrixCase) => ("marker" in c ? (c.marker ?? null) : matrix.default_marker);
 
-const run = (c: MatrixCase) =>
+const run = (c: MatrixCase, base?: readonly (typeof PLATFORMS)[number][]) =>
   buildSearchLinks(
     c.origin,
     c.destination,
     c.depart_date,
     c.return_date,
     taipeiToday(new Date(c.now)),
-    { marker: markerOf(c), platforms: platformsFor(c), month: c.month },
+    { marker: markerOf(c), platforms: platformsFor(c, base), month: c.month },
   );
 
 function datesIn(l: SearchLink, dep: string, ret: string): boolean {
@@ -109,6 +115,21 @@ describe("B6-1 shared matrix (parity with the Python builder)", () => {
         },
         c.id,
       ).toEqual(c.expect);
+    }
+  });
+
+  it("gives the same outcome without Trip.com under the shipped config (B6-2B)", () => {
+    for (const c of CASES) {
+      const ls = run(c, PLATFORMS);
+      expect(
+        {
+          compliant: ls.compliant,
+          itinerary_valid: ls.itineraryValid,
+          reasons: ls.reasons,
+          links: ls.links.map((l) => [l.platform, l.kind]),
+        },
+        c.id,
+      ).toEqual({ ...c.expect, links: c.expect.links.filter((pk) => pk[0] !== "tripcom") });
     }
   });
 

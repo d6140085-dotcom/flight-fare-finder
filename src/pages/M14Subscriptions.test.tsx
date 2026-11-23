@@ -444,9 +444,14 @@ describe("search links and affiliate fallback", () => {
     expect(google).toHaveAttribute("data-link-kind", "fallback");
     expect(google).toHaveTextContent("Google 航班 一般搜尋頁");
 
-    // KHH-BKK is not verified on Skyscanner/Trip.com: both are labelled general search pages.
+    // B6-2B: Trip.com is disabled pending an authorized affiliate integration, so it never appears.
+    expect(within(tyo).queryByRole("link", { name: /Trip\.com/ })).toBeNull();
+    expect(tyo.innerHTML).not.toContain("trip.com");
+
+    // KHH-BKK is not verified on Skyscanner: a labelled general search page.
     const bkk = item("高雄 → 曼谷");
-    for (const name of [/前往 Skyscanner 一般搜尋頁/, /前往 Trip.com 一般搜尋頁/]) {
+    expect(within(bkk).queryByRole("link", { name: /Trip\.com/ })).toBeNull();
+    for (const name of [/前往 Skyscanner 一般搜尋頁/]) {
       const l = within(bkk).getByRole("link", { name });
       expect(l).toHaveAttribute("data-link-kind", "fallback");
       expect(l).toHaveTextContent("一般搜尋頁");

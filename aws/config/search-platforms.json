@@ -6,7 +6,7 @@
      "verified_codes": {"codes": ["TPE", "RMQ", "TYO", "OKA"], "verified_on": "2026-11-06",
                         "how": "built-in browser: route, both dates and zh-TW shown; TWD not confirmed (bot check)"},
      "code_overrides": {}, "affiliate": {"enabled": false}},
-    {"id": "tripcom", "label": "Trip.com", "order": 2, "enabled": true, "role": "secondary",
+    {"id": "tripcom", "label": "Trip.com", "order": 2, "enabled": false, "role": "secondary",
      "verified_codes": {"codes": ["TPE", "KHH", "RMQ", "TYO", "OKA"], "verified_on": "2026-11-06",
                         "how": "built-in browser: route, both dates (round trip), zh-TW and TWD preserved by the redirect"},
      "code_overrides": {}, "affiliate": {"enabled": false}},
