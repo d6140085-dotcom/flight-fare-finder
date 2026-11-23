@@ -55,24 +55,69 @@ class ChecklistTests(unittest.TestCase):
         text = generate()
         self.assertIn("Affiliate attribution: NOT VERIFIED", text)
         for line in text.splitlines():
-            if "attribution" in line.lower() and "VERIFIED" in line.upper():
-                self.assertIn("NOT VERIFIED", line.upper(), line)   # never "attribution ... verified"
-            if "affiliate" in line.lower() or "marker" in line.lower():
-                self.assertNotRegex(line, r"(?<!NOT )VERIFIED(?! codes)", line)
+            if "attribution" in line.lower():
+                self.assertRegex(line, r"(?i)attribution(: | )NOT VERIFIED|attribution is a separate", line)
+                self.assertNotRegex(line, r"(?i)attribution(: | )verified", line)
+            if "**aviasales**" in line:                      # every Aviasales row says so explicitly
+                self.assertTrue(line.endswith("affiliate attribution NOT VERIFIED"), line)
 
-    def test_verified_and_unverified_routes_are_distinguished(self):
-        text = generate(origins=["TPE", "KHH"], destinations=["TYO", "LON"], month_offsets=[1])
+    def test_three_route_classes(self):
+        text = generate(origins=["TPE", "KHH", "RMQ"], destinations=["TYO", "OKA", "LON"], month_offsets=[1])
         blocks = {b.split("\n", 1)[0]: b for b in text.split("### ")[1:]}
-        tpe_tyo, khh_tyo, tpe_lon = blocks["TPE → TYO (2026-12)"], blocks["KHH → TYO (2026-12)"], blocks["TPE → LON (2026-12)"]
-        self.assertIn("**skyscanner** — itinerary — VERIFIED codes (2026-11-06, browser)", tpe_tyo)
-        self.assertIn("**skyscanner** — fallback — UNVERIFIED", khh_tyo)        # KHH not verified on Skyscanner
-        self.assertIn("**tripcom** — itinerary — VERIFIED codes", khh_tyo)
-        self.assertIn("**skyscanner** — fallback — UNVERIFIED", tpe_lon)
-        self.assertIn("**tripcom** — fallback — UNVERIFIED", tpe_lon)
+
+        def status(o, d, platform):
+            line = next(x for x in blocks[f"{o} → {d} (2026-12)"].splitlines() if x.startswith(f"- **{platform}**"))
+            return line.split(" — ", 2)[2]
+
+        browser = {("skyscanner", "TPE", "TYO"), ("skyscanner", "RMQ", "OKA"),
+                   ("tripcom", "TPE", "TYO"), ("tripcom", "RMQ", "OKA"), ("tripcom", "KHH", "OKA"),
+                   ("aviasales", "TPE", "TYO")}
+        for platform in ("skyscanner", "tripcom", "aviasales"):
+            for o in ("TPE", "KHH", "RMQ"):
+                for d in ("TYO", "OKA", "LON"):
+                    st = status(o, d, platform)
+                    with self.subTest(platform=platform, route=f"{o}-{d}"):
+                        if (platform, o, d) in browser:
+                            self.assertTrue(st.startswith("BROWSER_VERIFIED_ROUTE (this exact route opened"), st)
+                        else:
+                            self.assertNotIn("BROWSER_VERIFIED_ROUTE", st)   # codes alone never suffice
+        # both codes verified but the pair never opened -> VERIFIED_CODES_ONLY, not browser-verified
+        for platform, o, d in (("skyscanner", "TPE", "OKA"), ("skyscanner", "RMQ", "TYO"),
+                               ("tripcom", "KHH", "TYO"), ("tripcom", "TPE", "OKA"), ("tripcom", "RMQ", "TYO"),
+                               ("aviasales", "TPE", "LON"), ("aviasales", "KHH", "TYO")):
+            self.assertIn("VERIFIED_CODES_ONLY", status(o, d, platform))
+            self.assertIn("this combination was NOT opened in a browser", status(o, d, platform))
+        # a code outside verified_codes -> UNVERIFIED, general page in the app, candidate URL to check
+        for platform, o, d in (("skyscanner", "KHH", "TYO"), ("skyscanner", "KHH", "OKA"),
+                               ("skyscanner", "TPE", "LON"), ("tripcom", "RMQ", "LON")):
+            self.assertTrue(status(o, d, platform).startswith("UNVERIFIED — "), status(o, d, platform))
         self.assertIn("Candidate itinerary URL (UNVERIFIED, not used by the app): "
-                      "https://www.skyscanner.com.tw/transport/flights/tpe/lon/261220/261227/", tpe_lon)
-        self.assertNotIn("Candidate", tpe_tyo)
-        self.assertIn("GENERAL PAGE BY DESIGN", tpe_tyo)
+                      "https://www.skyscanner.com.tw/transport/flights/tpe/lon/261220/261227/", blocks["TPE → LON (2026-12)"])
+        self.assertNotIn("Candidate", blocks["TPE → TYO (2026-12)"])
+        self.assertNotIn("Candidate", blocks["TPE → OKA (2026-12)"])
+        self.assertIn("GENERAL PAGE BY DESIGN", blocks["TPE → TYO (2026-12)"])
+
+    def test_browser_evidence_is_exactly_the_documented_routes(self):
+        self.assertEqual(tool.BROWSER_VERIFIED_ON, "2026-11-06")
+        self.assertEqual(dict(tool.BROWSER_VERIFIED_ROUTES), {
+            "skyscanner": {("TPE", "TYO"), ("RMQ", "OKA")},
+            "tripcom": {("TPE", "TYO"), ("RMQ", "OKA"), ("KHH", "OKA")},
+            "aviasales": {("TPE", "TYO")},
+        })
+        cfg = tool.sl.load_config()
+        for pid, routes in tool.BROWSER_VERIFIED_ROUTES.items():   # evidence must agree with the config
+            codes = tool.verified_on(cfg, pid)[0]
+            for o, d in routes:
+                self.assertTrue(codes == "catalog" or (o in codes and d in codes), (pid, o, d))
+
+    def test_route_class_does_not_infer_from_codes(self):
+        cfg = tool.sl.load_config()
+        self.assertEqual(tool.route_class(cfg, "skyscanner", "TPE", "OKA"), tool.VERIFIED_CODES_ONLY)
+        self.assertEqual(tool.route_class(cfg, "skyscanner", "OKA", "TPE"), tool.VERIFIED_CODES_ONLY)  # direction matters
+        self.assertEqual(tool.route_class(cfg, "skyscanner", "TPE", "TYO"), tool.BROWSER_VERIFIED_ROUTE)
+        self.assertEqual(tool.route_class(cfg, "skyscanner", "KHH", "OKA"), tool.UNVERIFIED)
+        self.assertEqual(tool.route_class(cfg, "tripcom", "KHH", "OKA"), tool.BROWSER_VERIFIED_ROUTE)
+        self.assertIsNone(tool.route_class(cfg, "google", "TPE", "TYO"))
 
     def test_months_and_aviasales_year_cut_off(self):
         text = generate(origins=["TPE"], destinations=["TYO"])

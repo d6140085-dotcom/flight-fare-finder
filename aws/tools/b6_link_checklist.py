@@ -49,6 +49,35 @@ def strip_marker(url):
     return urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, urllib.parse.urlencode(q), ""))
 
 
+# Exact routes a person opened in a browser (route, both dates, round trip, language checked).
+# Evidence: docs/m1.4-multi-platform-search-links.md §4.2 and docs/m1.4-phase2b2-search-links.md §3,
+# all on 2026-11-06. Only these get BROWSER_VERIFIED_ROUTE; a route whose two codes are merely in
+# `verified_codes` is VERIFIED_CODES_ONLY. Add a route here only with new browser evidence (B6-2).
+BROWSER_VERIFIED_ON = "2026-11-06"
+BROWSER_VERIFIED_ROUTES = {
+    "skyscanner": frozenset({("TPE", "TYO"), ("RMQ", "OKA")}),
+    "tripcom": frozenset({("TPE", "TYO"), ("RMQ", "OKA"), ("KHH", "OKA")}),
+    "aviasales": frozenset({("TPE", "TYO")}),
+}
+BROWSER_VERIFIED_ROUTE, VERIFIED_CODES_ONLY, UNVERIFIED = "BROWSER_VERIFIED_ROUTE", "VERIFIED_CODES_ONLY", "UNVERIFIED"
+
+
+def route_class(cfg, pid, origin, destination):
+    """BROWSER_VERIFIED_ROUTE, VERIFIED_CODES_ONLY or UNVERIFIED for one platform and route.
+
+    Two codes in `verified_codes` never make the combination browser-verified: only the exact
+    routes in BROWSER_VERIFIED_ROUTES do. Aviasales' codes come from its own catalog (spec §4.3),
+    so every other Aviasales route is VERIFIED_CODES_ONLY. Google has no route links (None)."""
+    if pid == "google":
+        return None
+    if (origin, destination) in BROWSER_VERIFIED_ROUTES.get(pid, ()):
+        return BROWSER_VERIFIED_ROUTE
+    codes, _, _ = verified_on(cfg, pid)
+    if codes == "catalog" or (isinstance(codes, list) and origin in codes and destination in codes):
+        return VERIFIED_CODES_ONLY
+    return UNVERIFIED
+
+
 def verified_on(cfg, pid):
     p = next(p for p in cfg["platforms"] if p["id"] == pid)
     vc = p.get("verified_codes") or {}
@@ -56,17 +85,24 @@ def verified_on(cfg, pid):
 
 
 def status_for(cfg, pid, origin, destination, kind):
-    codes, when, enabled = verified_on(cfg, pid)
+    _, when, enabled = verified_on(cfg, pid)
     if not enabled:
         return "DISABLED in search-platforms.json"
-    if pid == "google":
+    cls = route_class(cfg, pid, origin, destination)
+    if cls is None:
         return "GENERAL PAGE BY DESIGN (no documented deep link)"
+    if cls == BROWSER_VERIFIED_ROUTE:
+        text = f"{cls} (this exact route opened in a browser on {BROWSER_VERIFIED_ON})"
+    elif cls == VERIFIED_CODES_ONLY:
+        source = "Aviasales catalog codes" if pid == "aviasales" else f"both codes in verified_codes ({when})"
+        text = f"{cls} ({source}; this combination was NOT opened in a browser)"
+    else:
+        return f"{UNVERIFIED} — the app shows the general page; candidate itinerary URL below is for checking only"
+    if kind != sl.ITINERARY:
+        text += "; general page for this date" + (" (no year in the link)" if pid == "aviasales" else "")
     if pid == "aviasales":
-        base = "codes: Aviasales catalog; format browser-verified for TPE-TYO only (2026-11-06)"
-        return base if kind == sl.ITINERARY else base + "; general page for this date (no year in the link)"
-    if codes != "catalog" and origin in codes and destination in codes:
-        return f"VERIFIED codes ({when}, browser)" if kind == sl.ITINERARY else "VERIFIED codes; general page for this date"
-    return "UNVERIFIED — the app shows the general page; candidate itinerary URL below is for checking only"
+        text += " — affiliate attribution NOT VERIFIED"      # route checks say nothing about attribution
+    return text
 
 
 def candidate(pid, origin, destination, dep, ret):
@@ -94,8 +130,10 @@ def build_checklist(today, *, origins, destinations, month_offsets, cfg=None, ca
         "",
         "- **Affiliate attribution: NOT VERIFIED.** Aviasales URLs below carry **no marker**; opening them",
         "  credits nobody. Attribution is a separate B6-3 dashboard check.",
-        "- **VERIFIED codes** = both codes are in that platform's `verified_codes` (browser check, date shown).",
-        "  **UNVERIFIED** = the app currently shows that platform's general search page; the candidate",
+        f"- **{BROWSER_VERIFIED_ROUTE}** = this exact route was opened in a browser ({BROWSER_VERIFIED_ON}).",
+        f"  **{VERIFIED_CODES_ONLY}** = both codes are verified for the platform, but this combination was",
+        "  never opened: the app builds an itinerary link for it, and it still needs a manual check.",
+        f"  **{UNVERIFIED}** = the app currently shows that platform's general search page; the candidate",
         "  itinerary URL is printed only so a person can check it. Record results in `search-platforms.json`.",
         "- Check each link by hand in a normal browser. Don't automate it (bot checks, provider terms).",
         "",
@@ -119,7 +157,7 @@ def build_checklist(today, *, origins, destinations, month_offsets, cfg=None, ca
                         out.append(f"  - App link (marker removed): {strip_marker(link.url)}")
                     else:
                         out.append(f"  - App link: {link.url}")
-                    if link.kind == sl.FALLBACK and st.startswith("UNVERIFIED") and ls.itinerary_valid:
+                    if link.kind == sl.FALLBACK and st.startswith(UNVERIFIED) and ls.itinerary_valid:
                         cand = candidate(link.platform, o, d, dep, ret)
                         if cand:
                             out.append(f"  - Candidate itinerary URL (UNVERIFIED, not used by the app): {cand}")

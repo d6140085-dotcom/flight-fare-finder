@@ -53,6 +53,8 @@ def search_links(m, now, deps):
         # itinerary link for a fare departing in another month. M1-shape messages carry no month;
         # resolve_month would derive it from the departure date itself, so there is nothing
         # independent to compare and None (no check) is passed. The builder validates the value.
+        # process() already drops such a message earlier (keys.resolve_month: fare outside the
+        # message month -> InvalidMessage); this second check covers direct render() calls.
         return searchlinks.build(o, d, f.get("depart_date"), f.get("return_date"), months.today(as_of_of(m, now)),
                                  catalog=deps.catalog, config=deps.links_config, marker=deps.marker,
                                  month=m.get("month"))
