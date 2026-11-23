@@ -136,8 +136,12 @@ def build_checklist(today, *, origins, destinations, month_offsets, cfg=None, ca
         f"  **{UNVERIFIED}** = the app currently shows that platform's general search page; the candidate",
         "  itinerary URL is printed only so a person can check it. Record results in `search-platforms.json`.",
         "- Check each link by hand in a normal browser. Don't automate it (bot checks, provider terms).",
-        "",
     ]
+    disabled = [p["label"] for p in sorted(cfg["platforms"], key=lambda x: x["order"]) if not p["enabled"]]
+    if disabled:
+        out += [f"- **Not listed (disabled in search-platforms.json): {', '.join(disabled)}.** Don't open their",
+                "  links: disabled providers are pending authorization (docs/m1.4-b6-status.md)."]
+    out.append("")
     for offset in month_offsets:
         dep, ret = sample_dates(today, offset)
         month = f"{dep:%Y-%m}"

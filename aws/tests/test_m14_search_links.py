@@ -29,7 +29,20 @@ from notify2 import config, mailer, searchlinks as sl, service  # noqa: E402
 TODAY = date(2026, 11, 11)
 MARKER = "000000"
 EMAIL = "user@example.com"
-CFG = sl.load_config()
+# The shipped config (aws/config/search-platforms.json) has Trip.com enabled:false since B6-2B,
+# pending an authorized affiliate integration. Its link-builder code is kept, so these tests still
+# exercise it through CFG: the shipped config with ONLY Trip.com switched back on, as if it were
+# authorized. Nothing ships with this fixture. SHIPPED is the real config; ShippedConfigTests pins it.
+SHIPPED = sl.load_config()
+
+
+def as_if_tripcom_authorized(cfg):
+    c = copy.deepcopy(cfg)
+    next(p for p in c["platforms"] if p["id"] == "tripcom")["enabled"] = True
+    return c
+
+
+CFG = as_if_tripcom_authorized(SHIPPED)
 CAT = sl.load_catalog()
 CATALOG = json.loads((AWS / "config" / "airports.json").read_text(encoding="utf-8"))
 VECTORS = json.loads((HERE / "vectors" / "search-links.json").read_text(encoding="utf-8"))
@@ -591,6 +604,19 @@ class EndToEndTests(unittest.TestCase):
             self.assertNotIn(EMAIL, url)
             self.assertNotIn("@", url)
 
+    def test_shipped_config_email_has_no_tripcom_and_same_history(self):
+        shipped = self.run_case(MARKER, links_config=SHIPPED)
+        full = self.run_case(MARKER, links_config=CFG)
+        self.assertEqual(shipped[0], "sent")
+        body = shipped[1][0]["body"]
+        self.assertNotIn("Trip.com", body["text"] + body["html"])
+        self.assertNotIn("trip.com", body["text"] + body["html"])
+        self.assertIn("https://www.aviasales.com/search/TPE1112TYO18121?marker=000000", body["text"])
+        self.assertIn("在 Skyscanner 搜尋此行程", body["html"])
+        self.assertIn(mailer.AFFILIATE_DISCLOSURE, body["text"])
+        strip = lambda items: sorted((i["pk"], i["sent_at"]) for i in items)   # noqa: E731
+        self.assertEqual(strip(shipped[3]), strip(full[3]))                 # same history rows and keys
+
     def test_blocked_notifications_send_nothing_and_record_nothing(self):
         broken = copy.deepcopy(CFG)
         del broken["platforms"][0]["verified_codes"]
@@ -606,6 +632,62 @@ class EndToEndTests(unittest.TestCase):
             for x in logs:
                 self.assertNotIn("@", x)
                 self.assertNotIn("not-a-marker", x)
+
+
+class ShippedConfigTests(unittest.TestCase):
+    """B6-2B: what actually ships. Trip.com is disabled pending an authorized affiliate integration;
+    its code stays, and every other provider behaves exactly as with Trip.com enabled."""
+
+    ROUTES = [(o, d) for o in ("TPE", "KHH", "RMQ") for d in ("TYO", "OKA", "OSA", "SEL", "NGO", "LON")]
+    DATES = [("2026-12-11", "2026-12-18"), ("2027-11-10", "2027-11-17"), ("2026-11-01", "2026-11-08"), ("bad", None)]
+
+    def test_shipped_config_disables_only_tripcom(self):
+        sl.validate_config(SHIPPED)
+        enabled = {p["id"]: p["enabled"] for p in SHIPPED["platforms"]}
+        self.assertEqual(enabled, {"skyscanner": True, "tripcom": False, "aviasales": True, "google": True})
+        self.assertEqual(as_if_tripcom_authorized(SHIPPED), CFG)          # the only difference
+        trip = next(p for p in SHIPPED["platforms"] if p["id"] == "tripcom")
+        self.assertEqual(trip["verified_codes"]["codes"], ["TPE", "KHH", "RMQ", "TYO", "OKA"])   # mapping kept
+        self.assertFalse(trip["affiliate"]["enabled"])
+
+    def test_tripcom_code_is_preserved(self):
+        self.assertEqual(sl.HOSTS["tripcom"], "tw.trip.com")
+        url = sl.tripcom_url("TPE", "TYO", date(2026, 12, 11), date(2026, 12, 18))
+        self.assertTrue(url.startswith("https://tw.trip.com/flights/showfarefirst?dcity=tpe&acity=tyo"))
+
+    def test_tripcom_is_omitted_and_everything_else_is_unchanged(self):
+        for o, d in self.ROUTES:
+            for dep, ret in self.DATES:
+                with self.subTest(route=f"{o}-{d}", dep=dep):
+                    shipped = build(o, d, dep, ret, cfg=SHIPPED)
+                    full = build(o, d, dep, ret, cfg=CFG)
+                    self.assertFalse(any(link.platform == "tripcom" for link in shipped.links))
+                    self.assertNotIn("trip.com", " ".join(link.url for link in shipped.links))  # nor /flights/
+                    self.assertEqual(shipped.links, tuple(link for link in full.links if link.platform != "tripcom"))
+                    self.assertEqual((shipped.compliant, shipped.itinerary_valid, shipped.reasons),
+                                     (full.compliant, full.itinerary_valid, full.reasons))
+                    self.assertTrue(shipped.has_affiliate)                 # labelled Aviasales link still there
+
+    def test_marker_gate_is_unchanged(self):
+        for bad in (None, "", "12", "123.sub", "abc", "1" * 13):
+            with self.subTest(marker=bad):
+                ls = build(marker=bad, cfg=SHIPPED)
+                self.assertEqual((ls.links, ls.compliant), ((), False))
+                self.assertIn("no_valid_aviasales_marker", ls.reasons)
+        ls = build(cfg=SHIPPED)
+        av = [link for link in ls.links if link.platform == "aviasales"]
+        self.assertEqual(len(av), 1)
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(av[0].url).query)["marker"], [MARKER])
+
+    def test_packaged_lambda_ships_tripcom_disabled(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pkg_n2_b62b", AWS / "scripts" / "package_notification_v2.py")
+        pkg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pkg)
+        with tempfile.TemporaryDirectory() as out:
+            r = pkg.build(Path(out))
+            packed = json.loads(zipfile.ZipFile(r["zip"]).read("notify2/data/search-platforms.json"))
+        self.assertEqual(packed, SHIPPED)
 
 
 class PackagingTests(unittest.TestCase):

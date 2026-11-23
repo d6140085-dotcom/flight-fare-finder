@@ -18,13 +18,19 @@ import {
 
 const TODAY: Day = { y: 2026, m: 11, d: 11 };
 const MARKER = "000000";
+// B6-2B: the shipped config (PLATFORMS) has Trip.com disabled pending an authorized affiliate
+// integration. Its builder code is kept, so these tests exercise it through AS_IF_AUTHORIZED: the
+// shipped platforms with ONLY Trip.com switched back on. Nothing ships with this fixture; the
+// "shipped config (B6-2B)" tests below pin what does.
+const AS_IF_AUTHORIZED = PLATFORMS.map((p) => (p.id === "tripcom" ? { ...p, enabled: true } : p));
 const build = (
   o: unknown = "TPE",
   d: unknown = "TYO",
   dep: unknown = "2026-12-11",
   ret: unknown = "2026-12-18",
   marker: string | null = MARKER,
-) => buildSearchLinks(o, d, dep, ret, TODAY, { marker });
+  platforms: readonly (typeof PLATFORMS)[number][] = AS_IF_AUTHORIZED,
+) => buildSearchLinks(o, d, dep, ret, TODAY, { marker, platforms });
 const by = (ls: LinkSet) => Object.fromEntries(ls.links.map((l) => [l.platform, l]));
 
 describe("search links: parity with the Phase 2B-2 Python builder", () => {
@@ -33,6 +39,7 @@ describe("search links: parity with the Phase 2B-2 Python builder", () => {
     for (const c of vectors.cases) {
       const ls = buildSearchLinks(c.origin, c.destination, c.depart_date, c.return_date, today, {
         marker: vectors.marker,
+        platforms: AS_IF_AUTHORIZED,
       });
       expect(
         ls.links.map((l) => ({ platform: l.platform, kind: l.kind, url: l.url, label: l.label })),
@@ -177,5 +184,55 @@ describe("dates", () => {
   it("uses the Taipei calendar date", () => {
     expect(taipeiToday(new Date("2026-11-10T16:30:00Z"))).toEqual({ y: 2026, m: 11, d: 11 });
     expect(taipeiToday(new Date("2026-11-10T15:30:00Z"))).toEqual({ y: 2026, m: 11, d: 10 });
+  });
+});
+
+describe("shipped config (B6-2B): Trip.com disabled pending authorization", () => {
+  it("disables only Trip.com and keeps its codes", () => {
+    expect(Object.fromEntries(PLATFORMS.map((p) => [p.id, p.enabled]))).toEqual({
+      skyscanner: true,
+      tripcom: false,
+      aviasales: true,
+      google: true,
+    });
+    const trip = PLATFORMS.find((p) => p.id === "tripcom");
+    expect(trip?.verified_codes.codes).toEqual(["TPE", "KHH", "RMQ", "TYO", "OKA"]);
+  });
+
+  it("omits Trip.com (never tw.trip.com/flights/) and leaves every other link unchanged", () => {
+    for (const o of ["TPE", "KHH", "RMQ"]) {
+      for (const d of ["TYO", "OKA", "OSA", "SEL", "NGO", "LON"]) {
+        for (const [dep, ret] of [
+          ["2026-12-11", "2026-12-18"],
+          ["2027-11-10", "2027-11-17"],
+          ["2026-11-01", "2026-11-08"],
+          ["bad", null],
+        ]) {
+          const shipped = build(o, d, dep, ret, MARKER, PLATFORMS);
+          const full = build(o, d, dep, ret, MARKER, AS_IF_AUTHORIZED);
+          expect(shipped.links.some((l) => l.platform === "tripcom")).toBe(false);
+          expect(shipped.links.map((l) => l.url).join(" ")).not.toContain("trip.com");
+          expect(shipped.links).toEqual(full.links.filter((l) => l.platform !== "tripcom"));
+          expect([shipped.compliant, shipped.itineraryValid, shipped.reasons]).toEqual([
+            full.compliant,
+            full.itineraryValid,
+            full.reasons,
+          ]);
+        }
+      }
+    }
+  });
+
+  it("keeps the Aviasales marker gate", () => {
+    for (const bad of [null, "", "12", "123.sub", "abc", "1".repeat(13)]) {
+      const ls = build("TPE", "TYO", "2026-12-11", "2026-12-18", bad, PLATFORMS);
+      expect(ls).toMatchObject({ links: [], compliant: false });
+      expect(ls.reasons).toContain("no_valid_aviasales_marker");
+    }
+    const av = build("TPE", "TYO", "2026-12-11", "2026-12-18", MARKER, PLATFORMS).links.filter(
+      (l) => l.platform === "aviasales",
+    );
+    expect(av).toHaveLength(1);
+    expect(new URL(av[0]!.url).searchParams.getAll("marker")).toEqual([MARKER]);
   });
 });
