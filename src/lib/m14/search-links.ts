@@ -9,8 +9,12 @@
 // - Travelpayouts condition 3: without a valid Aviasales marker there are NO links at all
 //   (`compliant: false`); a plain, non-affiliate Aviasales link is never produced.
 // - URL formats are fixed here; the config only switches/orders platforms and lists codes.
+// - Departure-month defence (B6-1): given the subscription's effective month, a fare departing in
+//   another month (year and month compared) gets general search pages only. The month is resolved
+//   elsewhere (the API's `effective_month`, from the shared month rules); this module only compares.
 import platformsConfig from "../../../aws/config/search-platforms.json";
 import { DESTINATIONS, ORIGINS } from "./catalog";
+import { MONTH_RE } from "./months";
 
 export type PlatformId = "skyscanner" | "tripcom" | "aviasales" | "google";
 export type LinkKind = "itinerary" | "fallback";
@@ -145,6 +149,18 @@ export function taipeiToday(now: Date): Day {
   return { y: get("year"), m: get("month"), d: get("day") };
 }
 
+/**
+ * Null when the fare departs in `month`, else the reason (B6-1). `month` is the subscription's
+ * effective month ("YYYY-MM"): the fixed month, or next month for a legacy rolling row, as
+ * resolved by the API. Undefined/null = no check (compatibility with callers that predate B6-1).
+ */
+export function monthProblem(dep: Day | null, month: string | null | undefined): string | null {
+  if (month === undefined || month === null) return null;
+  if (typeof month !== "string" || !MONTH_RE.test(month)) return "invalid_subscribed_month";
+  if (!dep) return null; // dateProblem already reports it; no itinerary link anyway
+  return `${pad(dep.y, 4)}-${pad(dep.m)}` === month ? null : "fare_outside_subscribed_month";
+}
+
 function dateProblem(dep: Day | null, ret: Day | null, today: Day): string | null {
   if (!dep || !ret) return "missing_or_malformed_date";
   if (cmp(dep, today) < 0) return "departure_in_the_past";
@@ -215,14 +231,25 @@ const empty = (itineraryValid: boolean, reasons: string[]): LinkSet => ({
   reasons,
 });
 
-/** Links for one round-trip reference fare. Bad input never throws. */
+/**
+ * Links for one round-trip reference fare. Bad input never throws.
+ *
+ * `opts.month` (added in B6-1, optional, so existing callers keep compiling and behaving the same):
+ * the subscription's effective month. A fare departing in another month, or a malformed month,
+ * gives general search pages only; the labelled Aviasales affiliate link stays (as its general
+ * page), so the result is still compliant.
+ */
 export function buildSearchLinks(
   origin: unknown,
   destination: unknown,
   departDate: unknown,
   returnDate: unknown,
   today: Day,
-  opts: { marker?: string | null | undefined; platforms?: readonly PlatformConfig[] } = {},
+  opts: {
+    marker?: string | null | undefined;
+    platforms?: readonly PlatformConfig[];
+    month?: string | null | undefined;
+  } = {},
 ): LinkSet {
   if (
     typeof origin !== "string" ||
@@ -236,11 +263,12 @@ export function buildSearchLinks(
   }
   const dep = parseDay(departDate);
   const ret = parseDay(returnDate);
-  const problem = dateProblem(dep, ret, today);
-  const reasons = problem ? [problem] : [];
+  const reasons = [dateProblem(dep, ret, today), monthProblem(dep, opts.month)].filter(
+    (r): r is string => r !== null,
+  );
+  const ok = reasons.length === 0;
   const marker = opts.marker;
-  if (!validMarker(marker))
-    return empty(problem === null, [...reasons, "no_valid_aviasales_marker"]);
+  if (!validMarker(marker)) return empty(ok, [...reasons, "no_valid_aviasales_marker"]);
 
   const links: SearchLink[] = [];
   for (const p of opts.platforms ?? PLATFORMS) {
@@ -249,7 +277,7 @@ export function buildSearchLinks(
     const verified = vc === "catalog" || (vc.includes(origin) && vc.includes(destination));
     const o = p.code_overrides[origin] ?? origin;
     const d = p.code_overrides[destination] ?? destination;
-    const itinerary = problem === null && verified && dep !== null && ret !== null;
+    const itinerary = ok && verified && dep !== null && ret !== null;
     if (p.id === "aviasales") {
       if (!p.affiliate.enabled) continue;
       // Aviasales' path has no year: only unambiguous before the same day next year.
@@ -266,10 +294,10 @@ export function buildSearchLinks(
     }
   }
   if (!links.some((l) => l.platform === "aviasales" && l.affiliate)) {
-    return empty(problem === null, [...reasons, "aviasales_affiliate_disabled"]);
+    return empty(ok, [...reasons, "aviasales_affiliate_disabled"]);
   }
   for (const l of links) checkUrl(l, marker);
-  return { links, itineraryValid: problem === null, compliant: true, reasons };
+  return { links, itineraryValid: ok, compliant: true, reasons };
 }
 
 function link(p: PlatformConfig, kind: LinkKind, url: string, affiliate: boolean): SearchLink {

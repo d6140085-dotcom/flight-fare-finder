@@ -13,6 +13,10 @@ the platform's own host with an allow-listed set of query keys.
   stay available wherever Data API reference fares are shown. Without a valid deploy-time marker
   NO links are built (LinkSet.compliant is False) and the caller must not send the email
   (fail closed); a plain, non-affiliate Aviasales link is never produced.
+- Departure-month defence (B6-1): when the caller passes the subscription's effective month,
+  a fare that doesn't depart in that month (year and month compared) gets general search pages
+  only, never an itinerary link. The month is resolved by the caller with the existing month
+  rules (notify2.months / keys.resolve_month); this module only compares.
 """
 import calendar
 import json
@@ -21,6 +25,8 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+
+from . import months
 
 HERE = Path(__file__).resolve().parent
 CODE_RE = re.compile(r"^[A-Z]{3}$")
@@ -207,6 +213,23 @@ def date_problem(depart, ret, today):
     return None
 
 
+def month_problem(depart, month):
+    """None when the fare departs in `month`, else the reason (B6-1 departure-month defence).
+
+    `month` is the subscription's effective month ("YYYY-MM"), already resolved by the caller
+    with the shared month rules: the fixed departure month, or next month (Asia/Taipei) for a
+    legacy rolling row. Both year and month must match. `None` means the caller supplied no
+    month: no check (compatibility with callers that predate B6-1; every production caller in
+    this repository passes one). A malformed month disables itinerary links (fail closed)."""
+    if month is None:
+        return None
+    if not months.valid_month(month):
+        return "invalid_subscribed_month"
+    if depart is None:
+        return None                   # date_problem already reports it; no itinerary link anyway
+    return None if f"{depart.year:04d}-{depart.month:02d}" == month else "fare_outside_subscribed_month"
+
+
 def aviasales_year_safe(ret, today):
     """Aviasales' path has DDMM without a year. Spec §4.2 assumed the 13-month window keeps that
     unambiguous; it doesn't (12+ months wraps), so the itinerary link is built only when the
@@ -251,18 +274,25 @@ def _label(pid, label, kind):
     return f"前往 {label} 一般搜尋頁（{FALLBACK_NOTICE}）"
 
 
-def build(origin, destination, depart_date, return_date, today, *, catalog, config, marker=None):
+def build(origin, destination, depart_date, return_date, today, *, catalog, config, marker=None, month=None):
     """LinkSet for one round-trip reference fare. Bad input never raises: unsupported codes and a
     missing/invalid marker give an empty, non-compliant LinkSet; bad dates give general search
-    pages (spec §6)."""
+    pages (spec §6).
+
+    `month` (keyword-only, added in B6-1, default None = unchecked, so existing callers keep
+    working): the subscription's effective month. A fare departing in another month, or a
+    malformed month, gives general search pages only (reason `fare_outside_subscribed_month` /
+    `invalid_subscribed_month`); the labelled Aviasales affiliate link stays (as its general page),
+    so the result is still compliant."""
     if not (isinstance(origin, str) and isinstance(destination, str) and CODE_RE.match(origin)
             and CODE_RE.match(destination) and origin in catalog.origins and destination in catalog.destinations):
         return LinkSet(reasons=("unsupported_code",))
     dep, ret = parse_day(depart_date), parse_day(return_date)
-    problem = date_problem(dep, ret, today)
+    problems = tuple(r for r in (date_problem(dep, ret, today), month_problem(dep, month)) if r)
+    ok = not problems
     if not valid_marker(marker):
         # fail closed: no affiliate link -> no links at all (never a plain Aviasales link)
-        return LinkSet((), problem is None, True, tuple(r for r in (problem, "no_valid_aviasales_marker") if r))
+        return LinkSet((), ok, True, problems + ("no_valid_aviasales_marker",))
     links = []
     for p in sorted(config["platforms"], key=lambda x: x["order"]):
         pid, label, role = p["id"], p["label"], p.get("role", "")
@@ -272,7 +302,7 @@ def build(origin, destination, depart_date, return_date, today, *, catalog, conf
         verified = vc == "catalog" or (origin in vc and destination in vc)
         ov = p.get("code_overrides") or {}
         o, d = ov.get(origin, origin), ov.get(destination, destination)
-        itinerary = problem is None and verified
+        itinerary = ok and verified
         if pid == "aviasales":
             if not (p.get("affiliate") or {}).get("enabled"):
                 continue                               # validate_config forbids this; never plain
@@ -289,10 +319,10 @@ def build(origin, destination, depart_date, return_date, today, *, catalog, conf
             links.append(Link(pid, _label(pid, label, FALLBACK), FALLBACK_URLS[pid], FALLBACK, role, False,
                               FALLBACK_NOTICE))
     if not any(link.platform == "aviasales" and link.affiliate for link in links):
-        return LinkSet((), problem is None, True, tuple(r for r in (problem, "aviasales_affiliate_disabled") if r))
+        return LinkSet((), ok, True, problems + ("aviasales_affiliate_disabled",))
     for link in links:
         check_url(link, marker)
-    return LinkSet(tuple(links), problem is None, False, tuple(r for r in (problem,) if r))
+    return LinkSet(tuple(links), ok, False, problems)
 
 
 def check_url(link, marker=None):

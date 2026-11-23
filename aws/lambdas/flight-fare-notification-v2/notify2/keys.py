@@ -14,7 +14,7 @@ import hmac
 import json
 import re
 
-from . import months
+from . import months, searchlinks
 
 STATE_SK = "STATE"
 ROUTE_RE = re.compile(r"^[A-Z]{3}-[A-Z]{3}$")
@@ -39,11 +39,22 @@ def subscriber_id(email, pepper):
 def resolve_month(message):
     """(effective month, source). Prefer the scheduler's resolved month (v2 messages); M1-shape
     messages fall back to the fare's departure month, which Phase 2A validation guarantees equals
-    the work item's month."""
+    the work item's month.
+
+    B6-1: a message that names its month must carry a fare departing in that month (year and
+    month). Otherwise the message is invalid (dropped, never retried) before anything is read,
+    rendered, sent or recorded: the email would present a fare for another month as an alert for
+    this subscription. The departure date is parsed exactly as the search-link builder parses it.
+    M1-shape messages (no month) are unchanged."""
     m = message.get("month")
     if m is not None:
         if not months.valid_month(m):
             raise InvalidMessage("invalid month")
+        dep = searchlinks.parse_day((message.get("cheapest") or {}).get("depart_date"))
+        if dep is None:
+            raise InvalidMessage("missing or malformed fare departure date")
+        if f"{dep.year:04d}-{dep.month:02d}" != m:
+            raise InvalidMessage("fare departs outside the message month")
         return m, "message"
     dep = (message.get("cheapest") or {}).get("depart_date")
     if isinstance(dep, str) and months.valid_month(dep[:7]):
