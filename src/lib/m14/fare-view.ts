@@ -52,7 +52,9 @@ export function fareView(sub: SubscriptionDto, now: Date, marker: string | null)
     check.depart_date,
     check.return_date,
     taipeiToday(now),
-    { marker },
+    // B6-1: the API's effective month (fixed month, or next month for a legacy rolling row).
+    // A fare departing in another month gets general search pages, never an itinerary link.
+    { marker, month: sub.effective_month },
   );
   if (!links.compliant) {
     // Fail closed: never a reference amount without the labelled Aviasales affiliate link.

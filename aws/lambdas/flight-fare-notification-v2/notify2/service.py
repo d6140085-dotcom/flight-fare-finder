@@ -48,8 +48,14 @@ def search_links(m, now, deps):
     try:
         # Links are a function of the message: the scheduler's as_of fixes "today", so a retry on
         # another day renders the same links (same payload under the same Idempotency-Key).
+        # B6-1: the scheduler's resolved effective month (the same field keys.resolve_month reads
+        # first: the fixed month, or next month for a legacy rolling row) guards against an
+        # itinerary link for a fare departing in another month. M1-shape messages carry no month;
+        # resolve_month would derive it from the departure date itself, so there is nothing
+        # independent to compare and None (no check) is passed. The builder validates the value.
         return searchlinks.build(o, d, f.get("depart_date"), f.get("return_date"), months.today(as_of_of(m, now)),
-                                 catalog=deps.catalog, config=deps.links_config, marker=deps.marker)
+                                 catalog=deps.catalog, config=deps.links_config, marker=deps.marker,
+                                 month=m.get("month"))
     except Exception as e:              # noqa: BLE001 - never send the reference fare without the link
         raise mailer.AffiliateLinkUnavailable(f"link_builder_error:{type(e).__name__}") from None
 
