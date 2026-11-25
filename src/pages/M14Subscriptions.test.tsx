@@ -426,32 +426,36 @@ describe("search links and affiliate fallback", () => {
     renderPage();
     await loaded();
     const tyo = item("台北 → 東京");
-    const sky = within(tyo).getByRole("link", { name: /在 Skyscanner 搜尋此行程/ });
-    expect(sky).toHaveAttribute("data-link-kind", "itinerary");
-    expect(sky).toHaveTextContent(/^Skyscanner$/); // short visible label, full accessible name
-    expect(sky.getAttribute("href")).toContain("/tpe/tyo/261211/261218/");
-    expect(sky).toHaveAttribute("rel", "noopener noreferrer");
-    expect(sky).toHaveAttribute("target", "_blank");
-    expect(sky).toHaveAccessibleName("在 Skyscanner 搜尋此行程（另開新視窗）");
+    // B6 MVP: Skyscanner and Trip.com are disabled pending authorization. On this (not yet live)
+    // page Aviasales stays the labelled text link (SearchLinks renders buttons only for Skyscanner
+    // and Trip.com; page presentation is B6-4) and Google the general-page fallback.
+    expect(within(tyo).queryByRole("link", { name: /Skyscanner/ })).toBeNull();
+    expect(tyo.innerHTML).not.toContain("skyscanner");
     const av = within(tyo).getByRole("link", {
       name: /Aviasales 搜尋此行程（票價來源・聯盟連結・英文介面）/,
     });
+    expect(av).toHaveAttribute("data-link-kind", "itinerary");
     expect(av).toHaveTextContent("Aviasales（票價來源・聯盟連結）"); // visibly labelled affiliate link
     expect(av.getAttribute("href")).toBe(
       "https://www.aviasales.com/search/TPE1112TYO18121?marker=000000",
     );
+    expect(av).toHaveAttribute("rel", "noopener noreferrer");
+    expect(av).toHaveAttribute("target", "_blank");
+    expect(av.className).not.toContain("bg-primary"); // a text link here, not a button
+    expect(within(tyo).getAllByRole("link", { name: /搜尋此行程/ })).toHaveLength(1);
+    expect(tyo).not.toHaveTextContent("在其他網站搜尋此行程"); // no button row without Skyscanner/Trip.com
     const google = within(tyo).getByRole("link", { name: /Google 航班 一般搜尋頁/ });
     expect(google).toHaveAttribute("data-link-kind", "fallback");
     expect(google).toHaveTextContent("Google 航班 一般搜尋頁");
 
-    // B6-2B: Trip.com is disabled pending an authorized affiliate integration, so it never appears.
+    // Trip.com is disabled pending an authorized affiliate integration, so it never appears.
     expect(within(tyo).queryByRole("link", { name: /Trip\.com/ })).toBeNull();
     expect(tyo.innerHTML).not.toContain("trip.com");
 
-    // KHH-BKK is not verified on Skyscanner: a labelled general search page.
+    // KHH-BKK: no Skyscanner or Trip.com either; Google is a labelled general search page.
     const bkk = item("高雄 → 曼谷");
-    expect(within(bkk).queryByRole("link", { name: /Trip\.com/ })).toBeNull();
-    for (const name of [/前往 Skyscanner 一般搜尋頁/]) {
+    expect(within(bkk).queryByRole("link", { name: /Trip\.com|Skyscanner/ })).toBeNull();
+    for (const name of [/Google 航班 一般搜尋頁/]) {
       const l = within(bkk).getByRole("link", { name });
       expect(l).toHaveAttribute("data-link-kind", "fallback");
       expect(l).toHaveTextContent("一般搜尋頁");
@@ -529,9 +533,15 @@ describe("mobile layout and accessibility", () => {
     const tyo = item("台北 → 東京");
     expect(tyo.querySelector("dl")?.className).toContain("grid-cols-2");
     expect(tyo.querySelector("dl")?.className).toContain("sm:grid-cols-4");
-    const sky = within(tyo).getByRole("link", { name: /Skyscanner/ });
-    expect(sky.className).toContain("w-full");
-    expect(sky.className).toContain("sm:w-auto");
+    // B6 MVP: no itinerary button row (Skyscanner and Trip.com disabled); the labelled Aviasales
+    // link and the Google general page remain reachable as links.
+    expect(within(tyo).getByRole("link", { name: /Aviasales 搜尋此行程/ })).toBeVisible();
+    expect(within(tyo).getByRole("link", { name: /Google 航班 一般搜尋頁/ })).toBeVisible();
+    expect(
+      within(tyo)
+        .queryAllByRole("link")
+        .every((a) => !a.className.includes("w-full")),
+    ).toBe(true);
     // Visible link texts stay short (no multi-line labels); details live in the accessible name.
     for (const a of within(tyo).getAllByRole("link")) {
       expect((a.textContent ?? "").length).toBeLessThanOrEqual(26);

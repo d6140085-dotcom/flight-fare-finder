@@ -60,8 +60,8 @@ export function PlanCard({ plan, subscription, onSave }: PlanCardProps) {
         </p>
       ) : (
         <p className="mt-4 text-sm text-muted-foreground">
-          近期最低價約 NT${twd.format(plan.hintTwd)}，可參考設定。Recent lowest fare is around NT$
-          {twd.format(plan.hintTwd)}.
+          設定你的目標價（新台幣），找到低於目標價的票價時以 email 通知你。Set a target price in
+          TWD; we&apos;ll email you when we find a fare below it.
         </p>
       )}
 
@@ -70,7 +70,7 @@ export function PlanCard({ plan, subscription, onSave }: PlanCardProps) {
         <Input
           id={inputId}
           inputMode="numeric"
-          placeholder={String(plan.hintTwd)}
+          placeholder="輸入目標價 Enter a target price"
           value={value}
           onChange={(e) => setValue(e.target.value)}
         />

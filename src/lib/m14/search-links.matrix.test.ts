@@ -33,8 +33,14 @@ interface MatrixCase {
 
 const CASES = matrix.cases as MatrixCase[];
 
-// B6-2B: Trip.com is disabled in the shipped config; the expectations cover it as if authorized.
-const AS_IF_AUTHORIZED = PLATFORMS.map((p) => (p.id === "tripcom" ? { ...p, enabled: true } : p));
+// Skyscanner and Trip.com are disabled in the shipped MVP config; the expectations cover them as if authorized.
+const AS_IF_AUTHORIZED = PLATFORMS.map((p) =>
+  p.id === "skyscanner" || p.id === "tripcom"
+    ? { ...p, enabled: true }
+    : p.id === "aviasales"
+      ? { ...p, role: "source" }
+      : p,
+);
 
 const platformsFor = (
   c: MatrixCase,
@@ -118,7 +124,7 @@ describe("B6-1 shared matrix (parity with the Python builder)", () => {
     }
   });
 
-  it("gives the same outcome without Trip.com under the shipped config (B6-2B)", () => {
+  it("gives the same outcome without Skyscanner and Trip.com under the shipped MVP config", () => {
     for (const c of CASES) {
       const ls = run(c, PLATFORMS);
       expect(
@@ -129,7 +135,10 @@ describe("B6-1 shared matrix (parity with the Python builder)", () => {
           links: ls.links.map((l) => [l.platform, l.kind]),
         },
         c.id,
-      ).toEqual({ ...c.expect, links: c.expect.links.filter((pk) => pk[0] !== "tripcom") });
+      ).toEqual({
+        ...c.expect,
+        links: c.expect.links.filter((pk) => pk[0] !== "tripcom" && pk[0] !== "skyscanner"),
+      });
     }
   });
 

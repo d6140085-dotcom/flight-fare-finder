@@ -146,5 +146,35 @@ class MonthGuardTests(dedup.Base):
             self.assertNotIn(A, x)                               # no address in logs
 
 
+@unittest.skipUnless(dedup.AVAILABLE, "boto3/moto not available")
+class LegacyM1TemplateTests(dedup.Base):
+    """B6 MVP safety: EMAIL_TEMPLATE=m1 (the legacy M1 email: Data API fare, unmarked link, no source
+    label) is blocked. No email, no history, no subscription change, and no SQS retry."""
+
+    def test_m1_template_is_blocked_without_retry(self):
+        import handler as h
+        self.sub(departure_month="2027-01")
+        before = self.subs.scan(ConsistentRead=True)["Items"]
+        m = message("2027-01", "2027-01-10T08:00:00+08:00", "2027-01-15T19:00:00+09:00")
+        ts = str(int(NOW.timestamp() * 1000))
+        d = self.deps(recheck=True, email_template="m1")
+        for _ in range(2):                                      # a redelivery is handled the same way
+            out = h.handle({"Records": [{"messageId": "legacy", "body": json.dumps(m),
+                                         "attributes": {"SentTimestamp": ts}}]}, d, now_fn=lambda: NOW)
+            self.assertEqual(out, {"batchItemFailures": []})    # nothing returned to SQS for retry
+        self.assertEqual(self.resend.requests, [])              # Resend never called
+        self.assertEqual(self.items(), [])                      # no claim, STATE, log or M1 row
+        self.assertEqual(self.subs.scan(ConsistentRead=True)["Items"], before)
+        self.assertEqual(sum("BLOCKED legacy_m1_template_disabled" in x for x in self.logs), 2)
+        for x in self.logs:
+            self.assertNotIn(A, x)
+
+    def test_reference_template_still_sends(self):
+        self.sub(departure_month="2027-01")
+        m = message("2027-01", "2027-01-10T08:00:00+08:00", "2027-01-15T19:00:00+09:00")
+        self.assertEqual(service.process(m, "delivery-1", NOW, self.deps(recheck=True)), "sent")
+        self.assertEqual(len(self.resend.requests), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

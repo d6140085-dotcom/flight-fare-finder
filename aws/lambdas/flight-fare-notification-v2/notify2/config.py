@@ -35,7 +35,7 @@ class Settings:
     queue_visibility_seconds: int = 180         # QUEUE_VISIBILITY_SECONDS: for the claim sanity check
     max_message_age_hours: Decimal = Decimal("20")  # MAX_MESSAGE_AGE_HOURS: never send for older fare events;
                                                     # must stay below Resend's 24 h idempotency window
-    email_template: str = "reference"           # EMAIL_TEMPLATE: reference (Phase 2B-2, search links) | m1 (rollback)
+    email_template: str = "reference"           # EMAIL_TEMPLATE: reference (Phase 2B-2) | m1 (legacy: every email blocked)
 
     def __post_init__(self):
         if not Decimal("0") < self.max_message_age_hours < Decimal("24"):

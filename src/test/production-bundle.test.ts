@@ -64,6 +64,9 @@ describe("built bundles", () => {
     // The M1 dashboard is still there.
     expect(js).toContain("Pick a route and a target price");
     expect(js).toContain("/subscriptions"); // M1 GET /subscriptions API path
+    // B6 MVP safety: the M1 plan cards no longer claim a recent fare (hard-coded amounts removed).
+    for (const s of ["近期最低價", "Recent lowest fare", "hintTwd"]) expect(js, s).not.toContain(s);
+    expect(js).toContain("設定你的目標價（新台幣）");
   }, 120_000);
 
   it("preview: the same scan finds the Phase 3A code (control)", async () => {

@@ -14,15 +14,23 @@ import {
   taipeiToday,
   type Day,
   type LinkSet,
+  type SearchLink,
 } from "./search-links";
 
 const TODAY: Day = { y: 2026, m: 11, d: 11 };
 const MARKER = "000000";
-// B6-2B: the shipped config (PLATFORMS) has Trip.com disabled pending an authorized affiliate
-// integration. Its builder code is kept, so these tests exercise it through AS_IF_AUTHORIZED: the
-// shipped platforms with ONLY Trip.com switched back on. Nothing ships with this fixture; the
-// "shipped config (B6-2B)" tests below pin what does.
-const AS_IF_AUTHORIZED = PLATFORMS.map((p) => (p.id === "tripcom" ? { ...p, enabled: true } : p));
+// The shipped config (PLATFORMS) is the email-first MVP: Skyscanner and Trip.com disabled pending
+// authorization, Aviasales primary, Google the fallback. Their builder code is kept, so these tests
+// exercise it through AS_IF_AUTHORIZED: the shipped platforms with Skyscanner and Trip.com switched
+// back on and Aviasales in its pre-MVP `source` role. Nothing ships with this fixture; the
+// "shipped MVP config" tests below pin what does.
+const AS_IF_AUTHORIZED = PLATFORMS.map((p) =>
+  p.id === "skyscanner" || p.id === "tripcom"
+    ? { ...p, enabled: true }
+    : p.id === "aviasales"
+      ? { ...p, role: "source" }
+      : p,
+);
 const build = (
   o: unknown = "TPE",
   d: unknown = "TYO",
@@ -187,19 +195,33 @@ describe("dates", () => {
   });
 });
 
-describe("shipped config (B6-2B): Trip.com disabled pending authorization", () => {
-  it("disables only Trip.com and keeps its codes", () => {
-    expect(Object.fromEntries(PLATFORMS.map((p) => [p.id, p.enabled]))).toEqual({
-      skyscanner: true,
-      tripcom: false,
-      aviasales: true,
-      google: true,
+// A link without its role (Aviasales is `primary` in the MVP, `source` in the full fixture).
+const noRole = ({ role: _role, ...rest }: SearchLink) => rest;
+
+describe("shipped MVP config: only Aviasales (primary) and Google", () => {
+  it("disables Skyscanner and Trip.com, keeps their codes, makes Aviasales primary", () => {
+    expect(Object.fromEntries(PLATFORMS.map((p) => [p.id, [p.enabled, p.role]]))).toEqual({
+      skyscanner: [false, "primary"],
+      tripcom: [false, "secondary"],
+      aviasales: [true, "primary"],
+      google: [true, "fallback_only"],
     });
-    const trip = PLATFORMS.find((p) => p.id === "tripcom");
-    expect(trip?.verified_codes.codes).toEqual(["TPE", "KHH", "RMQ", "TYO", "OKA"]);
+    expect(PLATFORMS.find((p) => p.id === "tripcom")?.verified_codes.codes).toEqual([
+      "TPE",
+      "KHH",
+      "RMQ",
+      "TYO",
+      "OKA",
+    ]);
+    expect(PLATFORMS.find((p) => p.id === "skyscanner")?.verified_codes.codes).toEqual([
+      "TPE",
+      "RMQ",
+      "TYO",
+      "OKA",
+    ]);
   });
 
-  it("omits Trip.com (never tw.trip.com/flights/) and leaves every other link unchanged", () => {
+  it("omits Skyscanner and Trip.com and leaves the Aviasales and Google links unchanged", () => {
     for (const o of ["TPE", "KHH", "RMQ"]) {
       for (const d of ["TYO", "OKA", "OSA", "SEL", "NGO", "LON"]) {
         for (const [dep, ret] of [
@@ -210,9 +232,16 @@ describe("shipped config (B6-2B): Trip.com disabled pending authorization", () =
         ]) {
           const shipped = build(o, d, dep, ret, MARKER, PLATFORMS);
           const full = build(o, d, dep, ret, MARKER, AS_IF_AUTHORIZED);
-          expect(shipped.links.some((l) => l.platform === "tripcom")).toBe(false);
-          expect(shipped.links.map((l) => l.url).join(" ")).not.toContain("trip.com");
-          expect(shipped.links).toEqual(full.links.filter((l) => l.platform !== "tripcom"));
+          expect(shipped.links.map((l) => l.platform)).toEqual(["aviasales", "google"]);
+          const urls = shipped.links.map((l) => l.url).join(" ");
+          expect(urls).not.toContain("trip.com");
+          expect(urls).not.toContain("skyscanner");
+          expect(shipped.links.map(noRole)).toEqual(
+            full.links
+              .filter((l) => l.platform === "aviasales" || l.platform === "google")
+              .map(noRole),
+          );
+          expect(shipped.links[0]?.role).toBe("primary");
           expect([shipped.compliant, shipped.itineraryValid, shipped.reasons]).toEqual([
             full.compliant,
             full.itineraryValid,

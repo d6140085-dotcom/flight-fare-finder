@@ -4,7 +4,8 @@ Outcomes (logged with a subscriber hash, never an address):
   skipped:<reason>  nothing sent, message done (deduped, duplicate, paused, expired, ...)
   sent / sent:duplicate_key / sent:claim_lost
   blocked:<reason>  reference-fare email without a valid Aviasales affiliate link (missing or
-                    invalid TP_MARKER, bad link config): nothing sent, nothing recorded, message done
+                    invalid TP_MARKER, bad link config), or the legacy M1 template selected
+                    (EMAIL_TEMPLATE=m1): nothing sent, nothing recorded, message done
   dropped:<reason>  permanent problem (invalid message, Resend 4xx), message done
   Retry exception   message returned to SQS (claim held by another worker, Resend 429/5xx/409
                     concurrent, network), as M1's partial-batch retry
@@ -63,9 +64,14 @@ def search_links(m, now, deps):
 
 
 def render(m, now, deps, t):
-    """(subject, html, text). Raises mailer.AffiliateLinkUnavailable for a blocked reference email."""
+    """(subject, html, text). Raises mailer.AffiliateLinkUnavailable for a blocked email.
+
+    EMAIL_TEMPLATE=m1 is blocked (B6 MVP safety): the legacy M1 email shows Aviasales Data API fares
+    with an unmarked 「立即訂購」 link, no source label and no disclosure, which the Travelpayouts
+    permission (spec §8.5, conditions 3 and 4) doesn't allow. mailer.render() is kept, unused, for
+    reference; rollback must use a previous Lambda version, never EMAIL_TEMPLATE=m1."""
     if deps.settings.email_template == "m1":
-        return mailer.render(m, deps.cities or {}, deps.airlines or {})
+        raise mailer.AffiliateLinkUnavailable("legacy_m1_template_disabled")
     links = search_links(m, now, deps)
     if links.reasons:
         deps.log(f"{t}: links: {','.join(links.reasons)}")

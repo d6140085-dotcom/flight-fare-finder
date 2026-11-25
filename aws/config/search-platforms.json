@@ -2,7 +2,7 @@
   "_comment": "Multi-platform flight search links (docs/m1.4-multi-platform-search-links.md). URL formats and allowed query keys live in code (notify2/searchlinks.py); this file holds order, on/off switches, verified codes and affiliate switches. Never put a marker, token or secret here: the Aviasales marker is injected at deploy time (env TP_MARKER).",
   "version": 1,
   "platforms": [
-    {"id": "skyscanner", "label": "Skyscanner", "order": 1, "enabled": true, "role": "primary",
+    {"id": "skyscanner", "label": "Skyscanner", "order": 1, "enabled": false, "role": "primary",
      "verified_codes": {"codes": ["TPE", "RMQ", "TYO", "OKA"], "verified_on": "2026-11-06",
                         "how": "built-in browser: route, both dates and zh-TW shown; TWD not confirmed (bot check)"},
      "code_overrides": {}, "affiliate": {"enabled": false}},
@@ -10,7 +10,7 @@
      "verified_codes": {"codes": ["TPE", "KHH", "RMQ", "TYO", "OKA"], "verified_on": "2026-11-06",
                         "how": "built-in browser: route, both dates (round trip), zh-TW and TWD preserved by the redirect"},
      "code_overrides": {}, "affiliate": {"enabled": false}},
-    {"id": "aviasales", "label": "Aviasales", "order": 3, "enabled": true, "role": "source",
+    {"id": "aviasales", "label": "Aviasales", "order": 3, "enabled": true, "role": "primary",
      "verified_codes": {"codes": "catalog", "verified_on": "2026-11-06",
                         "how": "M1 production link format; TPE-TYO verified in the built-in browser; codes are Travelpayouts' own"},
      "code_overrides": {}, "affiliate": {"enabled": true, "param": "marker", "env": "TP_MARKER", "required": true}},
