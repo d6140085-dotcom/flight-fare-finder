@@ -7,14 +7,12 @@ export const PLANS = [
     route: "TPE-TYO",
     label: "台北 ✈ 東京",
     labelEn: "Taipei → Tokyo",
-    hintTwd: 9325,
   },
   {
     planName: "seoul",
     route: "TPE-SEL",
     label: "台北 ✈ 首爾",
     labelEn: "Taipei → Seoul",
-    hintTwd: 5989,
   },
 ] as const;
 

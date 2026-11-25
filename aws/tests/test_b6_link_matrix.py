@@ -24,20 +24,24 @@ sys.path.insert(0, str(AWS / "lambdas" / "flight-fare-notification-v2"))
 from notify2 import config, months, searchlinks as sl, service  # noqa: E402
 
 MATRIX = json.loads((HERE / "vectors" / "search-links-matrix.json").read_text(encoding="utf-8"))
-# The shipped config (aws/config/search-platforms.json) has Trip.com enabled:false since B6-2B,
-# pending an authorized affiliate integration. Its link-builder code is kept, so these tests still
-# exercise it through CFG: the shipped config with ONLY Trip.com switched back on, as if it were
-# authorized. Nothing ships with this fixture. SHIPPED is the real config; ShippedConfigTests pins it.
+# The shipped config (aws/config/search-platforms.json) is the email-first MVP (B6 MVP safety):
+# Skyscanner and Trip.com enabled:false pending authorization, Aviasales the primary link, Google
+# the general fallback. The Skyscanner and Trip.com builder code is kept, so these tests still
+# exercise it through CFG: the shipped config with both switched back on and Aviasales back in its
+# pre-MVP `source` role, as if authorized. Nothing ships with this fixture. SHIPPED is the real
+# config; ShippedConfigTests pins it.
 SHIPPED = sl.load_config()
+AS_IF_AUTHORIZED = {"skyscanner": {"enabled": True}, "tripcom": {"enabled": True}, "aviasales": {"role": "source"}}
 
 
-def as_if_tripcom_authorized(cfg):
+def as_if_authorized(cfg):
     c = copy.deepcopy(cfg)
-    next(p for p in c["platforms"] if p["id"] == "tripcom")["enabled"] = True
+    for p in c["platforms"]:
+        p.update(AS_IF_AUTHORIZED.get(p["id"], {}))
     return c
 
 
-CFG = as_if_tripcom_authorized(SHIPPED)
+CFG = as_if_authorized(SHIPPED)
 CAT = sl.load_catalog()
 
 
@@ -105,7 +109,7 @@ class MatrixTests(unittest.TestCase):
                                      c["month"])
 
     def test_every_case_with_the_shipped_config(self):
-        """B6-2B: the shipped config gives exactly the expected outcome without Trip.com."""
+        """The shipped MVP config gives exactly the expected outcome without Skyscanner and Trip.com."""
         for c in MATRIX["cases"]:
             with self.subTest(c["id"]):
                 ls = run(c, base=SHIPPED)
@@ -114,7 +118,7 @@ class MatrixTests(unittest.TestCase):
                 self.assertEqual(ls.itinerary_valid, exp["itinerary_valid"])
                 self.assertEqual(list(ls.reasons), exp["reasons"])
                 self.assertEqual([[link.platform, link.kind] for link in ls.links],
-                                 [pk for pk in exp["links"] if pk[0] != "tripcom"])
+                                 [pk for pk in exp["links"] if pk[0] not in ("tripcom", "skyscanner")])
 
     def test_every_case(self):
         for c in MATRIX["cases"]:

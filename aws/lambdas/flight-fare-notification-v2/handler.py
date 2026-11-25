@@ -25,6 +25,9 @@ def deps():
     global _deps
     if _deps is None:
         settings = config.Settings.from_env()
+        if settings.email_template == "m1":
+            print("template: ERROR EMAIL_TEMPLATE=m1 selects the legacy M1 email, which is disabled; "
+                  "every email will be blocked (roll back with a previous Lambda version instead)")
         cfg = {}
 
         def resend_cfg():

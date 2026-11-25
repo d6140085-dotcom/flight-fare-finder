@@ -29,20 +29,24 @@ from notify2 import config, mailer, searchlinks as sl, service  # noqa: E402
 TODAY = date(2026, 11, 11)
 MARKER = "000000"
 EMAIL = "user@example.com"
-# The shipped config (aws/config/search-platforms.json) has Trip.com enabled:false since B6-2B,
-# pending an authorized affiliate integration. Its link-builder code is kept, so these tests still
-# exercise it through CFG: the shipped config with ONLY Trip.com switched back on, as if it were
-# authorized. Nothing ships with this fixture. SHIPPED is the real config; ShippedConfigTests pins it.
+# The shipped config (aws/config/search-platforms.json) is the email-first MVP (B6 MVP safety):
+# Skyscanner and Trip.com enabled:false pending authorization, Aviasales the primary link, Google
+# the general fallback. The Skyscanner and Trip.com builder code is kept, so these tests still
+# exercise it through CFG: the shipped config with both switched back on and Aviasales back in its
+# pre-MVP `source` role, as if authorized. Nothing ships with this fixture. SHIPPED is the real
+# config; ShippedConfigTests pins it.
 SHIPPED = sl.load_config()
+AS_IF_AUTHORIZED = {"skyscanner": {"enabled": True}, "tripcom": {"enabled": True}, "aviasales": {"role": "source"}}
 
 
-def as_if_tripcom_authorized(cfg):
+def as_if_authorized(cfg):
     c = copy.deepcopy(cfg)
-    next(p for p in c["platforms"] if p["id"] == "tripcom")["enabled"] = True
+    for p in c["platforms"]:
+        p.update(AS_IF_AUTHORIZED.get(p["id"], {}))
     return c
 
 
-CFG = as_if_tripcom_authorized(SHIPPED)
+CFG = as_if_authorized(SHIPPED)
 CAT = sl.load_catalog()
 CATALOG = json.loads((AWS / "config" / "airports.json").read_text(encoding="utf-8"))
 VECTORS = json.loads((HERE / "vectors" / "search-links.json").read_text(encoding="utf-8"))
@@ -522,15 +526,19 @@ class ServiceIntegrationTests(unittest.TestCase):
         del broken["platforms"][0]["verified_codes"]
         self.assertEqual(self.blocked(self.deps(links_config=broken)), "link_builder_error:KeyError")
 
-    def test_missing_config_or_marker_blocks_and_m1_rollback_is_unchanged(self):
+    def test_missing_config_or_marker_blocks_and_m1_template_is_blocked(self):
         self.assertEqual(self.blocked(self.deps(links_config=None)), "links_config_unavailable")
         self.assertEqual(self.blocked(self.deps(catalog=None)), "links_config_unavailable")
         self.assertEqual(self.blocked(self.deps(marker=None)), "no_valid_aviasales_marker")
         self.assertEqual(self.blocked(self.deps(marker="12345x")), "no_valid_aviasales_marker")
         self.assertEqual(self.blocked(self.deps(), fare(route="TPE-ZZZ")), "unsupported_code")
-        d = self.deps(settings=config.Settings(email_template="m1"), marker=None, links_config=None)
-        subject, page, text = service.render(fare(), self.NOW, d, "t")              # M1: no marker needed
-        self.assertEqual((subject, page, text), mailer.render(fare(), CITIES, {}))
+        # B6 MVP: the legacy M1 template is blocked, with or without a marker and config.
+        for d in (self.deps(settings=config.Settings(email_template="m1"), marker=None, links_config=None),
+                  self.deps(settings=config.Settings(email_template="m1"))):
+            with self.assertRaises(mailer.AffiliateLinkUnavailable) as ctx:
+                service.render(fare(), self.NOW, d, "t")
+            self.assertEqual(ctx.exception.reason, "legacy_m1_template_disabled")
+        subject, page, text = mailer.render(fare(), CITIES, {})                     # legacy code kept, unused
         self.assertIn("立即訂購", text)
         with self.assertRaises(config.ConfigError):
             config.Settings.from_env({"EMAIL_TEMPLATE": "fancy"})
@@ -572,7 +580,7 @@ class EndToEndTests(unittest.TestCase):
             raise unittest.SkipTest("boto3/moto not available")
         cls.dedup = dedup
 
-    def run_case(self, marker, links_config=CFG, **fare_kw):
+    def run_case(self, marker, links_config=CFG, settings=None, **fare_kw):
         dedup = self.dedup
 
         class Case(dedup.Base):
@@ -584,6 +592,8 @@ class EndToEndTests(unittest.TestCase):
         try:
             d = case.deps()
             d.links_config, d.catalog, d.marker, d.cities = links_config, CAT, marker, CITIES
+            if settings is not None:
+                d.settings = settings
             m = fare(**fare_kw)
             now = datetime(2026, 11, 11, 2, 0, tzinfo=timezone.utc)
             result = service.process(m, "delivery-1", now, d)
@@ -604,18 +614,33 @@ class EndToEndTests(unittest.TestCase):
             self.assertNotIn(EMAIL, url)
             self.assertNotIn("@", url)
 
-    def test_shipped_config_email_has_no_tripcom_and_same_history(self):
+    def test_mvp_email_has_only_aviasales_and_google_and_same_history(self):
+        """B6 MVP: the shipped email carries the labelled Aviasales link as the primary button and
+        the Google general page; no Skyscanner or Trip.com; history unchanged."""
         shipped = self.run_case(MARKER, links_config=SHIPPED)
         full = self.run_case(MARKER, links_config=CFG)
         self.assertEqual(shipped[0], "sent")
         body = shipped[1][0]["body"]
-        self.assertNotIn("Trip.com", body["text"] + body["html"])
-        self.assertNotIn("trip.com", body["text"] + body["html"])
-        self.assertIn("https://www.aviasales.com/search/TPE1112TYO18121?marker=000000", body["text"])
-        self.assertIn("在 Skyscanner 搜尋此行程", body["html"])
+        both = body["text"] + body["html"]
+        for absent in ("Skyscanner", "skyscanner", "Trip.com", "trip.com"):
+            self.assertNotIn(absent, both)
+        av = "https://www.aviasales.com/search/TPE1112TYO18121?marker=000000"
+        self.assertIn(av, body["text"])
+        self.assertIn(f'style="{mailer.BUTTON["primary"]}">在 Aviasales 搜尋此行程', body["html"])   # primary button
+        self.assertIn("https://www.google.com/travel/flights?hl=zh-TW", body["text"])
         self.assertIn(mailer.AFFILIATE_DISCLOSURE, body["text"])
+        self.assertIn("來源：Aviasales", body["text"])
         strip = lambda items: sorted((i["pk"], i["sent_at"]) for i in items)   # noqa: E731
         self.assertEqual(strip(shipped[3]), strip(full[3]))                 # same history rows and keys
+
+    def test_legacy_m1_template_sends_nothing_and_records_nothing(self):
+        """B6 MVP: EMAIL_TEMPLATE=m1 is blocked even with a valid marker and config."""
+        result, requests, logs, items = self.run_case(MARKER, links_config=SHIPPED,
+                                                      settings=config.Settings(email_template="m1"))
+        self.assertEqual(result, "blocked:legacy_m1_template_disabled")
+        self.assertEqual(requests, [])                             # Resend never called
+        self.assertEqual(items, [])                                # no claim, STATE, log or M1 row
+        self.assertTrue(any("BLOCKED legacy_m1_template_disabled" in x for x in logs))
 
     def test_blocked_notifications_send_nothing_and_record_nothing(self):
         broken = copy.deepcopy(CFG)
@@ -634,36 +659,54 @@ class EndToEndTests(unittest.TestCase):
                 self.assertNotIn("not-a-marker", x)
 
 
+def _no_role(link):
+    """A link without its role (Aviasales is `primary` in the MVP, `source` in the full fixture)."""
+    return (link.platform, link.label, link.url, link.kind, link.affiliate, link.notice)
+
+
 class ShippedConfigTests(unittest.TestCase):
-    """B6-2B: what actually ships. Trip.com is disabled pending an authorized affiliate integration;
-    its code stays, and every other provider behaves exactly as with Trip.com enabled."""
+    """What actually ships: the email-first MVP (B6 MVP safety). Skyscanner and Trip.com are disabled
+    pending authorization; their code stays. Aviasales is the primary link, Google the fallback, and
+    both behave exactly as in the full fixture."""
 
     ROUTES = [(o, d) for o in ("TPE", "KHH", "RMQ") for d in ("TYO", "OKA", "OSA", "SEL", "NGO", "LON")]
     DATES = [("2026-12-11", "2026-12-18"), ("2027-11-10", "2027-11-17"), ("2026-11-01", "2026-11-08"), ("bad", None)]
 
-    def test_shipped_config_disables_only_tripcom(self):
+    def test_shipped_config_is_the_mvp(self):
         sl.validate_config(SHIPPED)
-        enabled = {p["id"]: p["enabled"] for p in SHIPPED["platforms"]}
-        self.assertEqual(enabled, {"skyscanner": True, "tripcom": False, "aviasales": True, "google": True})
-        self.assertEqual(as_if_tripcom_authorized(SHIPPED), CFG)          # the only difference
-        trip = next(p for p in SHIPPED["platforms"] if p["id"] == "tripcom")
-        self.assertEqual(trip["verified_codes"]["codes"], ["TPE", "KHH", "RMQ", "TYO", "OKA"])   # mapping kept
-        self.assertFalse(trip["affiliate"]["enabled"])
+        state = {p["id"]: (p["enabled"], p["role"]) for p in SHIPPED["platforms"]}
+        self.assertEqual(state, {"skyscanner": (False, "primary"), "tripcom": (False, "secondary"),
+                                 "aviasales": (True, "primary"), "google": (True, "fallback_only")})
+        self.assertEqual(as_if_authorized(SHIPPED), CFG)          # the only differences
+        by_id = {p["id"]: p for p in SHIPPED["platforms"]}
+        self.assertEqual(by_id["tripcom"]["verified_codes"]["codes"], ["TPE", "KHH", "RMQ", "TYO", "OKA"])
+        self.assertEqual(by_id["skyscanner"]["verified_codes"]["codes"], ["TPE", "RMQ", "TYO", "OKA"])  # kept
+        for pid in ("skyscanner", "tripcom"):
+            self.assertFalse(by_id[pid]["affiliate"]["enabled"])
+        self.assertEqual(by_id["aviasales"]["affiliate"],
+                         {"enabled": True, "param": "marker", "env": "TP_MARKER", "required": True})   # unchanged
 
-    def test_tripcom_code_is_preserved(self):
+    def test_disabled_provider_code_is_preserved(self):
         self.assertEqual(sl.HOSTS["tripcom"], "tw.trip.com")
+        self.assertEqual(sl.HOSTS["skyscanner"], "www.skyscanner.com.tw")
         url = sl.tripcom_url("TPE", "TYO", date(2026, 12, 11), date(2026, 12, 18))
         self.assertTrue(url.startswith("https://tw.trip.com/flights/showfarefirst?dcity=tpe&acity=tyo"))
+        url = sl.skyscanner_url("TPE", "TYO", date(2026, 12, 11), date(2026, 12, 18))
+        self.assertTrue(url.startswith("https://www.skyscanner.com.tw/transport/flights/tpe/tyo/261211/261218/"))
 
-    def test_tripcom_is_omitted_and_everything_else_is_unchanged(self):
+    def test_only_aviasales_and_google_and_everything_else_unchanged(self):
         for o, d in self.ROUTES:
             for dep, ret in self.DATES:
                 with self.subTest(route=f"{o}-{d}", dep=dep):
                     shipped = build(o, d, dep, ret, cfg=SHIPPED)
                     full = build(o, d, dep, ret, cfg=CFG)
-                    self.assertFalse(any(link.platform == "tripcom" for link in shipped.links))
-                    self.assertNotIn("trip.com", " ".join(link.url for link in shipped.links))  # nor /flights/
-                    self.assertEqual(shipped.links, tuple(link for link in full.links if link.platform != "tripcom"))
+                    self.assertEqual([link.platform for link in shipped.links], ["aviasales", "google"])
+                    urls = " ".join(link.url for link in shipped.links)
+                    self.assertNotIn("trip.com", urls)
+                    self.assertNotIn("skyscanner", urls)
+                    self.assertEqual([_no_role(x) for x in shipped.links],
+                                     [_no_role(x) for x in full.links if x.platform in ("aviasales", "google")])
+                    self.assertEqual(shipped.links[0].role, "primary")          # Aviasales is the primary link
                     self.assertEqual((shipped.compliant, shipped.itinerary_valid, shipped.reasons),
                                      (full.compliant, full.itinerary_valid, full.reasons))
                     self.assertTrue(shipped.has_affiliate)                 # labelled Aviasales link still there
@@ -679,7 +722,7 @@ class ShippedConfigTests(unittest.TestCase):
         self.assertEqual(len(av), 1)
         self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(av[0].url).query)["marker"], [MARKER])
 
-    def test_packaged_lambda_ships_tripcom_disabled(self):
+    def test_packaged_lambda_ships_the_mvp_config(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("pkg_n2_b62b", AWS / "scripts" / "package_notification_v2.py")
         pkg = importlib.util.module_from_spec(spec)
@@ -706,7 +749,8 @@ class PackagingTests(unittest.TestCase):
                     "catalog=s.load_catalog(),config=s.load_config(),marker='000000').links[0].url)")
             out_text = subprocess.run([sys.executable, "-I", "-c", code], cwd=run, capture_output=True, text=True,
                                       env={"PYTHONDONTWRITEBYTECODE": "1"}, check=True).stdout
-            self.assertTrue(out_text.startswith("https://www.skyscanner.com.tw/transport/flights/tpe/tyo/"))
+            # B6 MVP: Aviasales is the first (primary) link of the packaged config.
+            self.assertTrue(out_text.startswith("https://www.aviasales.com/search/TPE1112TYO18121?marker=000000"))
 
     def test_unsafe_config_fails_the_build(self):
         import importlib.util

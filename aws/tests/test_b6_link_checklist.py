@@ -22,10 +22,13 @@ sys.path.insert(0, str(HERE.parent / "tools"))
 import b6_link_checklist as tool  # noqa: E402
 
 TODAY = date(2026, 11, 23)
-# The shipped config with only Trip.com switched back on, as if authorized (B6-2B): keeps the
-# Trip.com classification tests meaningful while the shipped config has it disabled.
+# The shipped config with Skyscanner and Trip.com switched back on (and Aviasales in its pre-MVP
+# `source` role), as if authorized: keeps their classification tests meaningful while the shipped
+# MVP config has both disabled.
 AUTHORIZED = tool.sl.load_config()
-next(p for p in AUTHORIZED["platforms"] if p["id"] == "tripcom")["enabled"] = True
+for _p in AUTHORIZED["platforms"]:
+    _p.update({"skyscanner": {"enabled": True}, "tripcom": {"enabled": True},
+               "aviasales": {"role": "source"}}.get(_p["id"], {}))
 
 
 def generate(**kw):
@@ -136,17 +139,18 @@ class ChecklistTests(unittest.TestCase):
 
     def test_only_allowed_hosts(self):
         hosts = set(re.findall(r"https://([^/\s?]+)", generate()))
-        self.assertEqual(hosts, {"www.skyscanner.com.tw", "www.aviasales.com", "www.google.com"})   # B6-2B
+        self.assertEqual(hosts, {"www.aviasales.com", "www.google.com"})   # shipped MVP config
         hosts = set(re.findall(r"https://([^/\s?]+)", generate(cfg=AUTHORIZED)))
         self.assertEqual(hosts, {"www.skyscanner.com.tw", "tw.trip.com", "www.aviasales.com", "www.google.com"})
 
-    def test_disabled_tripcom_is_not_listed_and_is_named(self):
-        """B6-2B: with the shipped config, Trip.com rows are absent and the header says why."""
+    def test_disabled_providers_are_not_listed_and_are_named(self):
+        """Shipped MVP config: Skyscanner and Trip.com rows are absent and the header says why."""
         text = generate()
-        self.assertNotIn("**tripcom**", text)
-        self.assertNotIn("trip.com/", text)
-        self.assertIn("**Not listed (disabled in search-platforms.json): Trip.com.** Don't open their", text)
-        self.assertIn("**skyscanner**", text)
+        for absent in ("**tripcom**", "trip.com/", "**skyscanner**", "skyscanner.com.tw"):
+            self.assertNotIn(absent, text)
+        self.assertIn("**Not listed (disabled in search-platforms.json): Skyscanner, Trip.com.** Don't open their",
+                      text)
+        self.assertIn("**aviasales**", text)
         self.assertNotIn("Not listed", generate(cfg=AUTHORIZED))
 
     def test_unsupported_code_is_reported_not_linked(self):
