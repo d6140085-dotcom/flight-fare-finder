@@ -91,9 +91,14 @@ class History:
         if state is None:
             cond = "attribute_not_exists(pk)"
         else:
-            # a claim may be taken if free, expired, or already ours (the redelivery of the same
-            # fare event after a crash re-enters its own claim)
-            cond = "version = :v AND (attribute_not_exists(claim_event) OR claim_expires < :now OR claim_event = :e)"
+            # a claim may be taken only if free or expired. A claim is exclusive while it lives,
+            # even against the same fare event: a sibling message (parser re-run) or a duplicate
+            # SQS delivery must wait. The redelivery of an interrupted attempt still re-enters its
+            # own claim, because the claim (CLAIM_SECONDS) expires before the queue's visibility
+            # timeout makes the message visible again. (B6-3A review: re-entering a LIVE claim let
+            # two workers hold one stream; if one then released it, a third event could claim and
+            # send while the first was still sending.)
+            cond = "version = :v AND (attribute_not_exists(claim_event) OR claim_expires < :now)"
             values.update({":v": state["version"], ":now": int(now.timestamp())})
         try:
             self.table.update_item(

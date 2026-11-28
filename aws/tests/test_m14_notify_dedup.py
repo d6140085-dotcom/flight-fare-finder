@@ -469,7 +469,10 @@ class IdempotencyTests(Base):
         other = month_msg("2027-01", price=7000)
         with self.assertRaises(service.Retry):                                            # other events wait
             self.run_msg(other, NOW + timedelta(seconds=60), delivery="msg-2")
-        self.assertEqual(self.run_msg(m, NOW + timedelta(seconds=60), delivery="msg-1"), "sent")   # re-enters its claim
+        with self.assertRaises(service.Retry):                                            # so does a live
+            self.run_msg(m, NOW + timedelta(seconds=60), delivery="msg-1")                # duplicate (B6-3A)
+        # SQS redelivers only after the visibility timeout (180 s); the claim (120 s) has expired
+        self.assertEqual(self.run_msg(m, NOW + timedelta(seconds=180), delivery="msg-1"), "sent")  # re-enters its claim
         self.assertEqual(len(self.resend.deliveries), 1)
         self.assertEqual(self.resend.requests[0]["body"], self.resend.requests[-1]["body"])      # same payload
         self.assertEqual(self.resend.requests[0]["key"], self.resend.requests[-1]["key"])
@@ -717,6 +720,8 @@ class HandlerAndSafetyTests(Base):
             config.Settings(claim_seconds=200)
         with self.assertRaises(config.ConfigError):
             config.Settings(claim_seconds=20)
+        with self.assertRaises(config.ConfigError):        # timeout + claim must stay below visibility
+            config.Settings(claim_seconds=160)
         self.assertEqual(config.Settings.from_env({}).floor_hours, Decimal("24"))
 
     def test_months_parity(self):

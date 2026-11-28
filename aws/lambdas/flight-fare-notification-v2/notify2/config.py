@@ -59,6 +59,12 @@ class Settings:
         if not self.lambda_timeout_seconds < self.claim_seconds < self.queue_visibility_seconds:
             raise ConfigError("CLAIM_SECONDS must be above the Lambda timeout and below the queue visibility "
                               "timeout, so a crashed claim expires before SQS redelivers the message")
+        if not self.lambda_timeout_seconds + self.claim_seconds < self.queue_visibility_seconds:
+            # a claim is exclusive until it expires (history.claim); it can be taken up to one
+            # Lambda timeout after the message was received, so it must expire before the message
+            # becomes visible again, or the redelivery of an interrupted attempt has to wait for
+            # one more visibility timeout
+            raise ConfigError("LAMBDA_TIMEOUT_SECONDS + CLAIM_SECONDS must stay below QUEUE_VISIBILITY_SECONDS")
 
     @classmethod
     def from_env(cls, env=None, *, link_mode_default="direct"):

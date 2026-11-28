@@ -143,7 +143,10 @@ class PinTests(PartnerBase):
         self.resend.statuses = ["lost"]                                  # sent, response lost
         with self.assertRaises(service.Retry):
             self.run_msg(m1, delivery="a", d=d)
-        self.assertEqual(self.run_msg(m2, NOW + timedelta(seconds=30), delivery="b", d=d), "sent")
+        with self.assertRaises(service.Retry):                            # m1's claim is live: m2 waits
+            self.run_msg(m2, NOW + timedelta(seconds=30), delivery="b", d=d)
+        self.assertEqual(len(self.resend.requests), 1)
+        self.assertEqual(self.run_msg(m2, NOW + timedelta(seconds=180), delivery="b", d=d), "sent")
         self.assertEqual(len(self.resend.deliveries), 1)
         self.assertEqual(self.resend.requests[0]["body"], self.resend.requests[1]["body"])   # same payload
         self.assertEqual(self.resend.requests[0]["key"], self.resend.requests[1]["key"])
@@ -182,8 +185,11 @@ class PinTests(PartnerBase):
         pk = "v2#pin-test#KHH-TYO#2027-01"
         d.history.claim(pk, None, "e1", NOW, 120)
         self.assertEqual(d.history.pin_link(pk, "e1", "https://x.example.test/1"), "https://x.example.test/1")
-        # a second attempt of the same event (re-entered claim) gets the first link
-        d.history.claim(pk, d.history.state(pk), "e1", NOW, 120)
+        # a live claim can't be re-entered, even by the same event
+        with self.assertRaises(dedup.history.ClaimConflict):
+            d.history.claim(pk, d.history.state(pk), "e1", NOW + timedelta(seconds=60), 120)
+        # a later attempt of the same event (claim expired) gets the first link
+        d.history.claim(pk, d.history.state(pk), "e1", NOW + timedelta(seconds=121), 120)
         self.assertEqual(d.history.pin_link(pk, "e1", "https://x.example.test/2"), "https://x.example.test/1")
         with self.assertRaises(dedup.history.ClaimConflict):          # not the claimant: never pins
             d.history.pin_link(pk, "e2", "https://x.example.test/3")
@@ -239,6 +245,138 @@ class PinTests(PartnerBase):
         self.assertEqual(len(self.resend.requests), 1)                    # only the earlier 429 attempt
         self.assertNotIn("claim_event", self.state())                     # released, nothing recorded
         self.assertNotIn("last_event_id", self.state())
+
+
+class ClaimOwnershipTests(PartnerBase):
+    """B6-3A review: claim ownership, stale workers and sibling messages. Deterministic: the
+    concurrent step runs inside FakeResend's hook (i.e. while the first worker is inside the Resend
+    call), and time is passed explicitly; no sleeps."""
+    PK = "v2#ownership-test#KHH-TYO#2027-01"
+
+    def test_live_claim_is_exclusive_even_for_the_same_event(self):
+        """Regression: re-entering a LIVE claim let a same-event sibling hold the stream too; its
+        Resend 429 released the claim, and a third (next) event claimed and sent while the first
+        worker was still sending: two emails. Now the sibling and the next event both wait."""
+        d = self.pdeps()
+        dest = self.dest(v2())
+        w1 = v2(link=partner(dest))
+        w2 = v2(link=partner(dest, order=("u", "sub_id", "trs", "marker")))           # same event id
+        w3 = v2(link=partner(dest), as_of="2026-11-20T03:59:00Z", price=7000)         # next event
+        out = {}
+
+        def during_w1_send(body):
+            if out:
+                return
+            self.resend.statuses = [429]               # would be W2's Resend response
+            for name, m, delivery in (("w2", w2, "b"), ("w3", w3, "c")):
+                try:
+                    out[name] = self.run_msg(m, NOW + timedelta(seconds=5), delivery=delivery, d=d)
+                except service.Retry:
+                    out[name] = "retry"
+            out["requests_during_w1"] = len(self.resend.requests)
+            self.resend.statuses = []                  # unused: neither reached Resend
+        self.resend.hook = during_w1_send
+        self.assertEqual(self.run_msg(w1, delivery="a", d=d), "sent")
+        self.assertEqual((out["w2"], out["w3"], out["requests_during_w1"]), ("retry", "retry", 0))
+        self.assertEqual(len(self.resend.deliveries), 1)
+        self.assertEqual(self.state()["last_event_id"], self.state()["link_event"])
+
+    def test_simultaneous_claims_from_one_read(self):
+        d = self.pdeps()
+        d.history.claim(self.PK, None, "e0", NOW, 120)
+        d.history.release(self.PK, "e0")
+        seen = d.history.state(self.PK)                 # both workers read the same version
+        d.history.claim(self.PK, seen, "e1", NOW, 120)
+        for eid in ("e1", "e2"):                        # same or another event: the stale read loses
+            with self.assertRaises(dedup.history.ClaimConflict):
+                d.history.claim(self.PK, seen, eid, NOW, 120)
+        self.assertEqual(d.history.state(self.PK)["claim_event"], "e1")
+
+    def test_expired_claim_is_taken_over_and_the_same_event_reuses_its_pin(self):
+        d = self.pdeps()
+        d.history.claim(self.PK, None, "e1", NOW, 120)
+        d.history.pin_link(self.PK, "e1", "https://x.example.test/1")      # worker died, no release
+        with self.assertRaises(dedup.history.ClaimConflict):                 # still live at +119 s
+            d.history.claim(self.PK, d.history.state(self.PK), "e1", NOW + timedelta(seconds=119), 120)
+        d.history.claim(self.PK, d.history.state(self.PK), "e1", NOW + timedelta(seconds=121), 120)
+        self.assertEqual(d.history.pin_link(self.PK, "e1", "https://x.example.test/2"), "https://x.example.test/1")
+
+    def test_stale_worker_cannot_touch_a_newer_claim_or_pin(self):
+        """Worker e1 outlives its claim (only possible if the Lambda timeout were misconfigured);
+        event e2 has taken the stream. e1's pin, release and commit can't change e2's claim or
+        link; its commit is recorded as claim_lost (monotonic), as before."""
+        d = self.pdeps()
+        d.history.claim(self.PK, None, "e1", NOW, 120)
+        d.history.pin_link(self.PK, "e1", "https://x.example.test/1")
+        d.history.claim(self.PK, d.history.state(self.PK), "e2", NOW + timedelta(seconds=121), 120)
+        self.assertEqual(d.history.pin_link(self.PK, "e2", "https://x.example.test/2"), "https://x.example.test/2")
+        with self.assertRaises(dedup.history.ClaimConflict):
+            d.history.pin_link(self.PK, "e1", "https://x.example.test/1")
+        d.history.release(self.PK, "e1")                                       # no effect
+        st = d.history.state(self.PK)
+        self.assertEqual((st["claim_event"], st["link_event"], st["link_url"]), ("e2", "e2", "https://x.example.test/2"))
+        r = d.history.commit(pk=self.PK, eid="e1", now=NOW + timedelta(seconds=130), price=8000, route="KHH-TYO",
+                             month="2027-01", sid="sid")
+        self.assertEqual(r, "claim_lost")
+        st = d.history.state(self.PK)
+        self.assertEqual((st["claim_event"], st["link_url"]), ("e2", "https://x.example.test/2"))
+        self.assertEqual(d.history.pin_link(self.PK, "e2", "https://x.example.test/3"), "https://x.example.test/2")
+
+    def test_concurrent_pin_writes_agree_on_one_link(self):
+        d = self.pdeps()
+        d.history.claim(self.PK, None, "e1", NOW, 120)
+        barrier, got, lock = threading.Barrier(8), [], threading.Lock()
+
+        def pin(i):
+            barrier.wait()
+            u = d.history.pin_link(self.PK, "e1", f"https://x.example.test/{i}")
+            with lock:
+                got.append(u)
+        threads = [threading.Thread(target=pin, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(got), 8)
+        self.assertEqual(len(set(got)), 1)
+        self.assertEqual(d.history.state(self.PK)["link_url"], got[0])
+
+    def test_invalid_sibling_after_unknown_outcome(self):
+        """A sends, the Resend outcome is unknown (claim and pin kept). Sibling B (same event,
+        invalid link) is blocked before any history write. A's redelivery then completes the event
+        with the pinned link: one email, history recorded, nothing lost."""
+        m_a = v2()
+        dest = self.dest(m_a)
+        m_a["aviasales_partner_url"] = partner(dest)
+        m_b = v2(link="https://evil.example.test/r")
+        d = self.pdeps()
+        self.resend.statuses = ["lost"]
+        with self.assertRaises(service.Retry):
+            self.run_msg(m_a, delivery="a", d=d)
+        before = self.state()
+        self.assertEqual(self.run_msg(m_b, NOW + timedelta(seconds=30), delivery="b", d=d),
+                         "blocked:partner_link_invalid:unapproved_host_or_path")
+        self.assertEqual(self.state(), before)                                  # claim and pin untouched
+        self.assertEqual(len(self.resend.requests), 1)
+        self.assertEqual(self.run_msg(m_a, NOW + timedelta(seconds=180), delivery="a", d=d), "sent")
+        self.assertEqual(len(self.resend.deliveries), 1)
+        self.assertEqual(self.state()["last_event_id"], before["claim_event"])
+        self.assertEqual(self.run_msg(m_b, NOW + timedelta(hours=1), delivery="b", d=d), "skipped:duplicate_event")
+
+    def test_unknown_outcome_never_reprocessed_bounds_the_gap_to_one_extra_alert(self):
+        """If A is never processed again (e.g. moved to a DLQ, or retention ends), its possible
+        send is never recorded. Its claim expires; the NEXT event of the stream is then sent even
+        inside the 24 h floor (one extra alert at most); later events are deduped against it."""
+        dest = self.dest(v2())
+        d = self.pdeps()
+        self.resend.statuses = ["lost"]
+        with self.assertRaises(service.Retry):
+            self.run_msg(v2(link=partner(dest)), delivery="a", d=d)
+        nxt = v2(link=partner(dest), as_of="2026-11-20T04:30:00Z")
+        self.assertEqual(self.run_msg(nxt, NOW + timedelta(minutes=30), delivery="n", d=d), "sent")
+        later = v2(link=partner(dest), as_of="2026-11-20T05:00:00Z")
+        self.assertEqual(self.run_msg(later, NOW + timedelta(hours=1), delivery="l", d=d), "skipped:deduped")
+        self.assertEqual(len(self.resend.deliveries), 2)        # A (possibly) + the next event
 
 
 class BlockedTests(PartnerBase):
@@ -497,6 +635,20 @@ class ModeConfigTests(unittest.TestCase):
         d = notify_handler.link_deps({"TP_MARKER": "000000", "TP_TRS": "12a"}, log=out.append)
         self.assertIsNone(d["partner_trs"])
         self.assertFalse(any("123456" in x or "12a" in x or "000000" in x for x in out), out)
+
+    def test_deployed_handler_settings_default_to_disabled(self):
+        """handler.deps() (the deployed entry point) with AFFILIATE_LINK_MODE unset -> disabled;
+        only an explicit value selects another mode. No AWS call: the pepper read is stubbed."""
+        h = load_handler()
+        for env, expected in (({}, "disabled"), ({"AFFILIATE_LINK_MODE": ""}, "disabled"),
+                              ({"AFFILIATE_LINK_MODE": "direct"}, "direct"),
+                              ({"AFFILIATE_LINK_MODE": "partner_api"}, "partner_api")):
+            with self.subTest(env=env), mock.patch.dict("os.environ", dict(dedup.ddb_local.FAKE_ENV, **env), clear=True), \
+                    mock.patch.object(h, "_param", return_value="p" * 40), mock.patch.object(h, "_deps", None), \
+                    redirect_stdout(io.StringIO()):
+                d = h.deps()
+                self.assertEqual(d.settings.affiliate_link_mode, expected)
+                self.assertEqual(d.partner_formats, ())                 # partner_api: fails closed
 
     def test_handler_prints_nothing_secret_at_cold_start(self):
         notify_handler = load_handler()
