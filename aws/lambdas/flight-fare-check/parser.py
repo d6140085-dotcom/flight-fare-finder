@@ -26,4 +26,5 @@ def handler(event, context):
     table = effects.ReadOnlyTable(boto3.resource("dynamodb").Table("subscriptions"))
     return runner.run_parser(event, settings=settings, catalog=config.load_catalog(), token=_token,
                              reader=effects.TableReader(table), now=datetime.now(timezone.utc),
-                             client_factory=factory)
+                             client_factory=factory,
+                             remaining_ms=getattr(context, "get_remaining_time_in_millis", None))
