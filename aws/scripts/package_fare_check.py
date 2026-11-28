@@ -2,7 +2,8 @@
 
 One deterministic ZIP serves both functions (handlers wrapper.handler and parser.handler): the
 same commit always gives the same bytes and CodeSha256. It contains wrapper.py, parser.py, the
-farecheck package and a copy of aws/config/airports.json. boto3 comes from the Lambda runtime.
+farecheck package, a copy of aws/config/airports.json and, under farecheck/data/, the
+search-link configuration and airport catalog (B6-3B). boto3 comes from the Lambda runtime.
 
 Usage: python3 aws/scripts/package_fare_check.py [out_dir]   (default: aws/build)
 Prints JSON: {"zip": path, "sha256": hex, "code_sha256": base64, "bytes": n, "files": [...]}
@@ -24,6 +25,10 @@ def entries():
     for p in sorted((SRC / "farecheck").glob("*.py")):
         files[f"farecheck/{p.name}"] = p.read_bytes()
     files["farecheck/config/airports.json"] = (AWS / "config" / "airports.json").read_bytes()
+    # B6-3B: the mirrored search-link builder (farecheck/searchlinks.py, identical to
+    # notify2/searchlinks.py) reads its configuration from farecheck/data/, as notify2 does
+    for name in ("search-platforms.json", "airports.json"):
+        files[f"farecheck/data/{name}"] = (AWS / "config" / name).read_bytes()
     return dict(sorted(files.items()))
 
 

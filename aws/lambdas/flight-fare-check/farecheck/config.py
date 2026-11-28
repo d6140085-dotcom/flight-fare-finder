@@ -8,13 +8,23 @@ unknown mode, or a DRY_RUN variable that disagrees with it, is a ConfigError rai
 AWS client exists.
 """
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 import json
 
 HERE = Path(__file__).resolve().parent
 FALSE_WORDS = {"0", "false", "no", "off"}
 DRY_RUN, LIVE = "dry_run", "live"
+# B6-3B: the same names and values as the notification's AFFILIATE_LINK_MODE. Only partner_api
+# changes the fare check (it creates the partner link before enqueueing); disabled (default) and
+# direct enqueue exactly as before.
+LINK_MODES = ("disabled", "direct", "partner_api")
+# partner_api sends trs and marker as JSON numbers (as documented), so a leading zero couldn't
+# survive the round trip: such values are refused rather than silently changed
+MARKER_RE = re.compile(r"^[1-9][0-9]{2,11}$")   # searchlinks.MARKER_RE, without a leading zero
+TRS_RE = re.compile(r"^[1-9][0-9]{0,11}$")      # partnerlinks.TRS_RE, without a leading zero
+SUB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")  # fixed, non-personal (never a user or subscription id)
 
 
 class ConfigError(ValueError):
@@ -95,6 +105,26 @@ class Settings:
     queue_url: str = ""           # FARE_QUEUE_URL (live parser only)
     parser_function: str = "flight-parser"
     tp_param: str = "/flight/travelpayouts"
+    affiliate_link_mode: str = "disabled"   # AFFILIATE_LINK_MODE: partner_api creates partner links (B6-3B)
+    tp_marker: str = field(default=None, repr=False)   # TP_MARKER (partner_api only; never logged)
+    tp_trs: str = field(default=None, repr=False)      # TP_TRS (partner_api only; never logged)
+    partner_sub_id: str = "fff-alert-v1"    # PARTNER_SUB_ID: fixed Sub ID, no personal data
+
+    def __post_init__(self):
+        if self.affiliate_link_mode not in LINK_MODES:
+            raise ConfigError("AFFILIATE_LINK_MODE must be one of " + ", ".join(LINK_MODES))
+        if not SUB_ID_RE.match(self.partner_sub_id or ""):
+            raise ConfigError("PARTNER_SUB_ID must be 1-32 letters, digits, '-' or '_'")
+        if self.affiliate_link_mode == "partner_api":
+            # never name the values in the error
+            if not MARKER_RE.match(self.tp_marker or ""):
+                raise ConfigError("AFFILIATE_LINK_MODE=partner_api requires a valid TP_MARKER")
+            if not TRS_RE.match(self.tp_trs or ""):
+                raise ConfigError("AFFILIATE_LINK_MODE=partner_api requires a valid TP_TRS")
+            if self.message_version != 2:
+                # the notification rebuilds the destination from the message's as_of and month;
+                # v1 messages have neither, so producer and consumer could disagree
+                raise ConfigError("AFFILIATE_LINK_MODE=partner_api requires NOTIFY_MESSAGE_VERSION=2")
 
     @property
     def dry_run(self):
@@ -119,4 +149,8 @@ class Settings:
                    message_version=bounded_int(env, "NOTIFY_MESSAGE_VERSION", 1, 1, 2),
                    queue_url=env.get("FARE_QUEUE_URL", ""),
                    parser_function=env.get("PARSER_FUNCTION") or "flight-parser",
-                   tp_param=env.get("TP_PARAM") or "/flight/travelpayouts")
+                   tp_param=env.get("TP_PARAM") or "/flight/travelpayouts",
+                   affiliate_link_mode=(env.get("AFFILIATE_LINK_MODE") or "disabled").strip().lower(),
+                   tp_marker=(env.get("TP_MARKER") or "").strip() or None,
+                   tp_trs=(env.get("TP_TRS") or "").strip() or None,
+                   partner_sub_id=(env.get("PARTNER_SUB_ID") or "fff-alert-v1").strip())

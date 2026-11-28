@@ -202,6 +202,17 @@ def expected_destination(direct_url, marker):
     return urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, "", ""))
 
 
+def _same_id(echoed, ours):
+    """The documentation shows `trs` and `marker` as JSON numbers in request and response. An
+    echoed integer must equal ours numerically; an echoed string must equal ours exactly; booleans,
+    floats and anything else are rejected."""
+    if isinstance(echoed, bool):
+        return False
+    if isinstance(echoed, int):
+        return str(ours).isdigit() and echoed == int(ours)
+    return isinstance(echoed, str) and echoed == str(ours)
+
+
 def check_api_response(body, requested, *, marker, trs):
     """Layer A, for the future producer (the fare check): the documented response of
     POST /links/v1/create for a request of `requested` URLs with shorten=false. Returns
@@ -222,9 +233,9 @@ def check_api_response(body, requested, *, marker, trs):
     result = body.get("result")
     if not isinstance(result, dict):
         raise PartnerLinkError("api_no_result")
-    if str(result.get("marker")) != str(marker) or not marker:
+    if not marker or not _same_id(result.get("marker"), marker):
         raise PartnerLinkError("api_marker_mismatch")
-    if str(result.get("trs")) != str(trs) or not trs:
+    if not trs or not _same_id(result.get("trs"), trs):
         raise PartnerLinkError("api_trs_mismatch")
     if result.get("shorten") is not False:
         raise PartnerLinkError("api_short_links")

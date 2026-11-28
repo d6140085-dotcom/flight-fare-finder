@@ -9,7 +9,7 @@ Live mode fans out to the parser, passing the resolved month and the scheduler's
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from . import matching, months, status, workitems
+from . import matching, months, partnerapi, status, workitems
 from .config import ConfigError
 from .effects import DryRunPublisher, DryRunViolation, SqsPublisher
 from .travelpayouts import OK, Client
@@ -107,7 +107,10 @@ def parse_event(event, catalog, now):
     return workitems.WorkItem(o, d, month), as_of
 
 
-def run_parser(event, *, settings, catalog, token, reader, now, transport=None, client_factory=None, log=print):
+def run_parser(event, *, settings, catalog, token, reader, now, transport=None, client_factory=None, log=print,
+               partner=None, remaining_ms=None):
+    """`partner`: test injection for the Partner Links API (dict of approved_partner_link keyword
+    arguments, e.g. transport, auth_header, formats, sleep). Production passes nothing."""
     dry_run = settings.dry_run or event.get("dry_run") is True   # a payload can only turn it on
     try:
         item, as_of = parse_event(event, catalog, now)
@@ -134,6 +137,23 @@ def run_parser(event, *, settings, catalog, token, reader, now, transport=None, 
     # One message per user and stream: overlapping rolling + fixed rows of one user that both
     # match produce one alert listing both subscriptions (R-MM-1 overlap policy).
     bodies = matching.messages(ev.matched, item, o, ev.usd_offer, v2_as_of)
+    if bodies and settings.affiliate_link_mode == "partner_api":
+        # B6-3B: one partner link per fare offer, created after matching and BEFORE anything is
+        # enqueued; every recipient gets the same link. Any failure enqueues nothing.
+        if dry_run:
+            log(f"{item.key}: DRY_RUN partner link not requested (the Partner Links API is never called in dry run)")
+        else:
+            try:
+                link = partnerapi.approved_partner_link(
+                    bodies[0], token=token, marker=settings.tp_marker, trs=settings.tp_trs,
+                    sub_id=settings.partner_sub_id, remaining_ms=remaining_ms, **(partner or {}))
+            except partnerapi.PartnerLinkUnavailable as e:
+                log(f"{item.key}: partner link unavailable ({e.reason}); enqueued nothing for "
+                    f"{len(bodies)} matched recipient(s); the next scheduled fare check retries")
+                out.update({"cheapest_twd": o.price, "matched": 0, "skipped": ev.skipped,
+                            "partner_link": e.reason, "not_enqueued": len(bodies)})
+                return out
+            bodies = [dict(b, aviasales_partner_url=link) for b in bodies]
     for body in bodies:
         publisher.send(body)
     out.update({"cheapest_twd": o.price, "matched": len(bodies), "skipped": ev.skipped})
