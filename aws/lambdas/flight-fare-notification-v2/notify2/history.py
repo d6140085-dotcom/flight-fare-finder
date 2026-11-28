@@ -11,6 +11,12 @@ Protocol per stream (state item = (pk, "STATE")):
                 Put log item  (pk, sent_at=<now>)                 IF attribute_not_exists(pk)
                 [Put M1 row   (email#route, sent_at=<now>)        IF attribute_not_exists(pk)]
      release  UpdateItem REMOVE claim IF claim_event = this event   (on any non-send outcome)
+  2a. link    (AFFILIATE_LINK_MODE=partner_api) UpdateItem SET link_url, link_event
+              IF claim_event = this event AND link_event <> this event: the first claimed attempt
+              of a fare event fixes the partner link; every later attempt of the SAME event reuses
+              it (even after a release), so a retry can never change the affiliate URL. A link
+              pinned by another event is never reused. release/commit leave link_* in place (they
+              only ever match their own event id).
   2b. pin     (R-MM-1 messages) UpdateItem SET claim_target = if_not_exists(claim_target, :t)
               IF claim_event = this event: the target shown in the email is fixed by the first
               attempt, so every retry of the same fare event sends the same payload under the
@@ -85,9 +91,14 @@ class History:
         if state is None:
             cond = "attribute_not_exists(pk)"
         else:
-            # a claim may be taken if free, expired, or already ours (the redelivery of the same
-            # fare event after a crash re-enters its own claim)
-            cond = "version = :v AND (attribute_not_exists(claim_event) OR claim_expires < :now OR claim_event = :e)"
+            # a claim may be taken only if free or expired. A claim is exclusive while it lives,
+            # even against the same fare event: a sibling message (parser re-run) or a duplicate
+            # SQS delivery must wait. The redelivery of an interrupted attempt still re-enters its
+            # own claim, because the claim (CLAIM_SECONDS) expires before the queue's visibility
+            # timeout makes the message visible again. (B6-3A review: re-entering a LIVE claim let
+            # two workers hold one stream; if one then released it, a third event could claim and
+            # send while the first was still sending.)
+            cond = "version = :v AND (attribute_not_exists(claim_event) OR claim_expires < :now)"
             values.update({":v": state["version"], ":now": int(now.timestamp())})
         try:
             self.table.update_item(
@@ -119,6 +130,30 @@ class History:
         if item.get("claim_event") != eid or item.get("claim_target_event") != eid:
             raise ClaimConflict(pk)
         return int(item["claim_target"])
+
+    def pin_link(self, pk, eid, url):
+        """The canonical partner link for this fare event: the link this same event pinned on any
+        earlier attempt (claimed then released, or still claimed by a concurrent delivery of the
+        same event), else `url` (now pinned). Only the current claimant can pin, so two events can
+        never race for one stream's link, and a concurrent duplicate of the same event reads the
+        winner's link. Raises ClaimConflict if the claim is no longer ours. The caller validates
+        the returned link again before using it."""
+        if not isinstance(url, str) or not url:
+            raise ValueError("no partner link to pin")
+        try:
+            self.table.update_item(
+                Key={"pk": pk, "sent_at": keys.STATE_SK},
+                UpdateExpression="SET link_url = :u, link_event = :e",
+                ConditionExpression="claim_event = :e AND (attribute_not_exists(link_event) OR link_event <> :e)",
+                ExpressionAttributeValues={":u": url, ":e": eid})
+            return url
+        except ClientError as e:
+            if _code(e) != "ConditionalCheckFailedException":
+                raise
+        item = self.table.get_item(Key={"pk": pk, "sent_at": keys.STATE_SK}, ConsistentRead=True).get("Item") or {}
+        if item.get("claim_event") != eid or item.get("link_event") != eid or not item.get("link_url"):
+            raise ClaimConflict(pk)
+        return item["link_url"]
 
     def release(self, pk, eid):
         try:

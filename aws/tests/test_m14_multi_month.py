@@ -443,7 +443,7 @@ class OverlapFlowTests(dedup.Base):
             self.run_msg(m, delivery="sqs-1", d=d)
         self.assertEqual(self.state()["claim_target"], 9000)
         self.put(FIXED, 8500)                                   # resumed meanwhile
-        self.assertEqual(self.run_msg(m, at=NOW + timedelta(seconds=90), delivery="sqs-1", d=d), "sent")
+        self.assertEqual(self.run_msg(m, at=NOW + timedelta(seconds=180), delivery="sqs-1", d=d), "sent")
         first, last = self.resend.requests[0], self.resend.requests[-1]
         self.assertEqual((first["key"], first["body"]), (last["key"], last["body"]))
         self.assertEqual(len(self.resend.deliveries), 1)
@@ -481,7 +481,7 @@ class OverlapFlowTests(dedup.Base):
             with self.assertRaises(dedup.service.Retry):
                 self.run_msg(m, delivery="sqs-1", d=d)
             self.put(FIXED, 8500)
-            self.run_msg(m, at=NOW + timedelta(seconds=90), delivery="sqs-1", d=d)
+            self.run_msg(m, at=NOW + timedelta(seconds=180), delivery="sqs-1", d=d)
         self.assertNotEqual(self.resend.requests[0]["body"]["text"], self.resend.requests[-1]["body"]["text"])
 
     def test_idempotency_key_and_payload_are_functions_of_the_fare_event(self):

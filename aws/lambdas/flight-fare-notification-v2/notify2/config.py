@@ -7,6 +7,15 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 FALSE_WORDS = {"0", "false", "no", "off"}
+# AFFILIATE_LINK_MODE (B6-3A): how the labelled Aviasales affiliate link is produced.
+#   disabled     no affiliate link: every reference-fare email is blocked (condition 3)
+#   direct       marker appended to the Aviasales URL (TP_MARKER). Travelpayouts recommends the
+#                Link Generator / Partner Links API instead and doesn't guarantee attribution for
+#                these links (ticket #257588, 2026-11-27): not for production attribution.
+#   partner_api  official partner link carried in the message (aviasales_partner_url), validated
+#                by notify2.partnerlinks; never falls back to `direct`. Fails closed while no link
+#                format is approved (partnerlinks.APPROVED_FORMATS is empty).
+LINK_MODES = ("disabled", "direct", "partner_api")
 
 
 class ConfigError(ValueError):
@@ -36,6 +45,8 @@ class Settings:
     max_message_age_hours: Decimal = Decimal("20")  # MAX_MESSAGE_AGE_HOURS: never send for older fare events;
                                                     # must stay below Resend's 24 h idempotency window
     email_template: str = "reference"           # EMAIL_TEMPLATE: reference (Phase 2B-2) | m1 (legacy: every email blocked)
+    affiliate_link_mode: str = "direct"         # AFFILIATE_LINK_MODE: see LINK_MODES. The default keeps offline
+                                                # callers unchanged; the deployed handler defaults to `disabled`
 
     def __post_init__(self):
         if not Decimal("0") < self.max_message_age_hours < Decimal("24"):
@@ -43,12 +54,23 @@ class Settings:
                               "for 24 hours; every retry must stay inside that window)")
         if self.email_template not in ("reference", "m1"):
             raise ConfigError("EMAIL_TEMPLATE must be `reference` or `m1`")
+        if self.affiliate_link_mode not in LINK_MODES:
+            raise ConfigError("AFFILIATE_LINK_MODE must be one of " + ", ".join(LINK_MODES))
         if not self.lambda_timeout_seconds < self.claim_seconds < self.queue_visibility_seconds:
             raise ConfigError("CLAIM_SECONDS must be above the Lambda timeout and below the queue visibility "
                               "timeout, so a crashed claim expires before SQS redelivers the message")
+        if not self.lambda_timeout_seconds + self.claim_seconds < self.queue_visibility_seconds:
+            # a claim is exclusive until it expires (history.claim); it can be taken up to one
+            # Lambda timeout after the message was received, so it must expire before the message
+            # becomes visible again, or the redelivery of an interrupted attempt has to wait for
+            # one more visibility timeout
+            raise ConfigError("LAMBDA_TIMEOUT_SECONDS + CLAIM_SECONDS must stay below QUEUE_VISIBILITY_SECONDS")
 
     @classmethod
-    def from_env(cls, env=None):
+    def from_env(cls, env=None, *, link_mode_default="direct"):
+        """`link_mode_default` applies when AFFILIATE_LINK_MODE is unset. The deployed handler
+        passes "disabled", so a deployment that doesn't choose a mode sends no affiliate link
+        (and so no reference-fare email); offline callers keep "direct"."""
         env = os.environ if env is None else env
         try:
             return cls(floor_hours=Decimal(env.get("NOTIFY_FLOOR_HOURS") or "24"),
@@ -63,7 +85,8 @@ class Settings:
                        lambda_timeout_seconds=int(env.get("LAMBDA_TIMEOUT_SECONDS") or 30),
                        queue_visibility_seconds=int(env.get("QUEUE_VISIBILITY_SECONDS") or 180),
                        max_message_age_hours=Decimal(env.get("MAX_MESSAGE_AGE_HOURS") or "20"),
-                       email_template=(env.get("EMAIL_TEMPLATE") or "reference").strip().lower())
+                       email_template=(env.get("EMAIL_TEMPLATE") or "reference").strip().lower(),
+                       affiliate_link_mode=(env.get("AFFILIATE_LINK_MODE") or link_mode_default).strip().lower())
         except (ArithmeticError, ValueError) as e:
             if isinstance(e, ConfigError):
                 raise

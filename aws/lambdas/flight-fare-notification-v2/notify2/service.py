@@ -5,17 +5,19 @@ Outcomes (logged with a subscriber hash, never an address):
   sent / sent:duplicate_key / sent:claim_lost
   blocked:<reason>  reference-fare email without a valid Aviasales affiliate link (missing or
                     invalid TP_MARKER, bad link config), or the legacy M1 template selected
-                    (EMAIL_TEMPLATE=m1): nothing sent, nothing recorded, message done
+                    (EMAIL_TEMPLATE=m1), or AFFILIATE_LINK_MODE=disabled, or in partner_api
+                    mode a missing/invalid aviasales_partner_url: nothing sent, nothing
+                    recorded, message done
   dropped:<reason>  permanent problem (invalid message, Resend 4xx), message done
   Retry exception   message returned to SQS (claim held by another worker, Resend 429/5xx/409
                     concurrent, network), as M1's partial-batch retry
 """
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from . import history, keys, mailer, months, rules, searchlinks, subkeys
+from . import history, keys, mailer, months, partnerlinks, rules, searchlinks, subkeys
 from .history import ClaimConflict
 
 
@@ -37,11 +39,20 @@ class Deps:
     links_config: dict = None     # validated search-platforms.json, or None: no links section
     catalog: object = None        # searchlinks.Catalog, or None: no links section
     marker: str = None            # Aviasales marker (TP_MARKER, deploy time); None: plain Aviasales link only
+    partner_trs: str = None       # TP_TRS: Travelpayouts project id, for formats with a `trs` rule (never logged)
+    partner_formats: tuple = partnerlinks.APPROVED_FORMATS   # approved partner-link formats (empty: fail closed)
 
 
-def search_links(m, now, deps):
+def search_links(m, now, deps, partner_url=None):
     """The fare's search links. Any problem becomes AffiliateLinkUnavailable with a data-free
-    reason: the reference-fare email is then not sent (Travelpayouts condition 3)."""
+    reason: the reference-fare email is then not sent (Travelpayouts condition 3).
+
+    AFFILIATE_LINK_MODE (B6-3A): `disabled` blocks; `direct` is unchanged; `partner_api` replaces
+    the Aviasales link with the message's aviasales_partner_url (or `partner_url`, the link pinned
+    to this fare event) after strict validation, and never falls back to the direct link."""
+    mode = deps.settings.affiliate_link_mode
+    if mode == "disabled":
+        raise mailer.AffiliateLinkUnavailable("affiliate_links_disabled")
     if deps.links_config is None or deps.catalog is None:
         raise mailer.AffiliateLinkUnavailable("links_config_unavailable")
     o, d = m["route"].split("-")
@@ -56,23 +67,48 @@ def search_links(m, now, deps):
         # independent to compare and None (no check) is passed. The builder validates the value.
         # process() already drops such a message earlier (keys.resolve_month: fare outside the
         # message month -> InvalidMessage); this second check covers direct render() calls.
-        return searchlinks.build(o, d, f.get("depart_date"), f.get("return_date"), months.today(as_of_of(m, now)),
-                                 catalog=deps.catalog, config=deps.links_config, marker=deps.marker,
-                                 month=m.get("month"))
+        links = searchlinks.build(o, d, f.get("depart_date"), f.get("return_date"), months.today(as_of_of(m, now)),
+                                  catalog=deps.catalog, config=deps.links_config, marker=deps.marker,
+                                  month=m.get("month"))
     except Exception as e:              # noqa: BLE001 - never send the reference fare without the link
         raise mailer.AffiliateLinkUnavailable(f"link_builder_error:{type(e).__name__}") from None
+    if mode == "partner_api":
+        return with_partner_link(links, m.get("aviasales_partner_url") if partner_url is None else partner_url, deps)
+    return links
 
 
-def render(m, now, deps, t):
+def with_partner_link(links, url, deps):
+    """`links` with its Aviasales link replaced by the validated partner link. The expected
+    destination is the direct link searchlinks built (same route, dates and month checks) without
+    the marker, so the destination never comes from the message. A non-compliant LinkSet (no valid
+    TP_MARKER, ...) is returned as is: render_reference blocks it with its own reasons."""
+    av = links.aviasales
+    if not links.compliant or av is None:
+        return links
+    if url is None:
+        raise mailer.AffiliateLinkUnavailable("partner_link_missing")
+    try:
+        expected = partnerlinks.expected_destination(av.url, deps.marker)
+        partnerlinks.check_format(url, expected_destination=expected, marker=deps.marker,
+                                  trs=getattr(deps, "partner_trs", None),
+                                  formats=getattr(deps, "partner_formats", partnerlinks.APPROVED_FORMATS))
+    except partnerlinks.PartnerLinkError as e:
+        raise mailer.AffiliateLinkUnavailable(f"partner_link_invalid:{e.reason}") from None
+    swapped = replace(av, url=url, via="partner_api")
+    return replace(links, links=tuple(swapped if link is av else link for link in links.links))
+
+
+def render(m, now, deps, t, partner_url=None):
     """(subject, html, text). Raises mailer.AffiliateLinkUnavailable for a blocked email.
 
     EMAIL_TEMPLATE=m1 is blocked (B6 MVP safety): the legacy M1 email shows Aviasales Data API fares
     with an unmarked 「立即訂購」 link, no source label and no disclosure, which the Travelpayouts
     permission (spec §8.5, conditions 3 and 4) doesn't allow. mailer.render() is kept, unused, for
-    reference; rollback must use a previous Lambda version, never EMAIL_TEMPLATE=m1."""
+    reference. EMAIL_TEMPLATE=m1 is never a rollback; neither is a previous Lambda version unless
+    verified compliant. Otherwise suspend delivery (docs/m1.4-b3-suspension-rollback.md)."""
     if deps.settings.email_template == "m1":
         raise mailer.AffiliateLinkUnavailable("legacy_m1_template_disabled")
-    links = search_links(m, now, deps)
+    links = search_links(m, now, deps, partner_url)
     if links.reasons:
         deps.log(f"{t}: links: {','.join(links.reasons)}")
     return mailer.render_reference(m, deps.cities or {}, deps.airlines or {}, links)
@@ -255,7 +291,7 @@ def process(m, delivery_id, now, deps, enqueued_at=None):
         subject, page, text = render(m, now, deps, t)
     except mailer.AffiliateLinkUnavailable as e:
         deps.log(f"{t}: BLOCKED {e.reason} (reference-fare email needs the labelled Aviasales affiliate "
-                 "link; nothing sent or recorded; check TP_MARKER and search-platforms.json)")
+                 "link; nothing sent or recorded; check TP_MARKER, AFFILIATE_LINK_MODE and search-platforms.json)")
         return f"blocked:{e.reason}"
     try:
         deps.history.claim(pk, state, eid, now, deps.settings.claim_seconds)
@@ -274,6 +310,16 @@ def process(m, delivery_id, now, deps, enqueued_at=None):
                                 email=email, dual_write=deps.settings.legacy_dual_write)
             deps.log(f"{t}: recorded unconfirmed earlier attempt ({reason})")
             return "recorded:unconfirmed"
+        partner = None
+        if deps.settings.affiliate_link_mode == "partner_api":
+            # B6-3A: the first claimed attempt of this fare event fixes the partner link; any
+            # other message or retry of the same event id (a parser re-run, a redelivery after
+            # an unknown Resend outcome) reuses it, so one event id -> one payload under one
+            # Idempotency-Key. The message's own link was validated before the claim.
+            try:
+                partner = deps.history.pin_link(pk, eid, m.get("aviasales_partner_url"))
+            except ClaimConflict:
+                raise Retry(f"{t}: claim lost before sending") from None
         target = presented_target(m, eligible)
         if m.get("subscription_keys") is not None and deps.settings.recheck_subscription:
             # first attempt pins its choice; a redelivery (e.g. after an unknown Resend outcome)
@@ -282,10 +328,22 @@ def process(m, delivery_id, now, deps, enqueued_at=None):
                 target = deps.history.pin_target(pk, eid, target)
             except ClaimConflict:
                 raise Retry(f"{t}: claim lost before sending") from None
-        if target != m.get("target_price"):
+        if target != m.get("target_price") or partner is not None:
             # e.g. the strictest overlapping subscription was paused since the fare check: show
-            # the target of one that still wants the alert (pure re-render, same links)
-            subject, page, text = render({**m, "target_price": target}, now, deps, t)
+            # the target of one that still wants the alert (pure re-render, same links); in
+            # partner_api mode the pinned link is validated again here and used
+            try:
+                subject, page, text = render({**m, "target_price": target}, now, deps, t, partner)
+            except mailer.AffiliateLinkUnavailable as e:
+                if ours:
+                    # an earlier attempt may have sent with this link: never send another one
+                    deps.history.commit(pk=pk, eid=eid, now=now, price=price, route=route, month=month, sid=sid,
+                                        email=email, dual_write=deps.settings.legacy_dual_write)
+                    deps.log(f"{t}: recorded unconfirmed earlier attempt (pinned link rejected: {e.reason})")
+                    return "recorded:unconfirmed"
+                deps.history.release(pk, eid)
+                deps.log(f"{t}: BLOCKED {e.reason} (pinned partner link; nothing sent)")
+                return f"blocked:{e.reason}"
         kw = {"opener": deps.opener} if deps.opener else {}
         status, outcome, err = mailer.send(deps.resend_cfg(), email, subject, page, text, keys.idempotency_key(eid), **kw)
     except BaseException:
