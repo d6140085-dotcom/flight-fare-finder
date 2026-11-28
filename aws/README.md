@@ -83,6 +83,14 @@ nothing recorded) rather than show a non-affiliate link. The
 Travelpayouts API token is unrelated and must never appear in links. See
 `docs/m1.4-phase2b2-search-links.md`.
 
+B6-3A adds `AFFILIATE_LINK_MODE` to the v2 function: `disabled` (also when unset on the deployed
+function: every reference-fare email blocked), `direct` (the `?marker=` link above; Travelpayouts
+recommends partner links instead and doesn't guarantee attribution for these) or `partner_api`
+(the official partner link carried in the message as `aviasales_partner_url`, validated and pinned
+per fare event; blocked while no link format is approved). `TP_TRS` (project id, not a secret,
+never committed or logged) is read only for formats that check it. See `docs/m1.4-b6-status.md`
+§1.3.
+
 While `from` is `onboarding@resend.dev`, Resend only delivers to the Resend account's own
 address (others get `403`; `example.com` addresses get `422`). Verify a domain (M3) to email anyone else.
 

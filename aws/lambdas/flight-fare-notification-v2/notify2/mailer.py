@@ -69,7 +69,9 @@ def render_reference(m, cities, airlines, links):
     fares are never shown without one, and never next to a plain Aviasales link."""
     shown = list(links.links) if links is not None else []
     av = [link for link in shown if link.platform == "aviasales"]
-    if not (len(av) == 1 and av[0].affiliate and "marker=" in av[0].url):
+    # direct: the marker must be in the Aviasales URL; partner_api: the official partner link,
+    # already validated against an approved format and the expected destination (B6-3A)
+    if not (len(av) == 1 and av[0].affiliate and (av[0].via == "partner_api" or "marker=" in av[0].url)):
         raise AffiliateLinkUnavailable(",".join(getattr(links, "reasons", ()) or ()) or "no_affiliate_link")
     o, d = (cities.get(c, c) for c in m["route"].split("-"))
     f, usd, target = m["cheapest"], m.get("cheapest_usd"), m["target_price"]

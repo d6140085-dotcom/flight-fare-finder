@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import boto3
 
-from notify2 import config, history, keys, searchlinks, service
+from notify2 import config, history, keys, partnerlinks, searchlinks, service
 
 _ssm = boto3.client("ssm")
 _ddb = boto3.resource("dynamodb")
@@ -24,10 +24,14 @@ def _param(name):
 def deps():
     global _deps
     if _deps is None:
-        settings = config.Settings.from_env()
+        # B6-3A: a deployment must choose AFFILIATE_LINK_MODE; unset means `disabled` (no
+        # reference-fare email at all), never an affiliate mode nobody approved
+        settings = config.Settings.from_env(link_mode_default="disabled")
         if settings.email_template == "m1":
             print("template: ERROR EMAIL_TEMPLATE=m1 selects the legacy M1 email, which is disabled; "
-                  "every email will be blocked (roll back with a previous Lambda version instead)")
+                  "every email will be blocked (a previous Lambda version is not automatically compliant: "
+                  "suspend delivery by disabling the SQS trigger unless a verified compliant version exists)")
+        link_mode_notice(settings.affiliate_link_mode)
         cfg = {}
 
         def resend_cfg():
@@ -47,6 +51,19 @@ def deps():
     return _deps
 
 
+def link_mode_notice(mode, formats=None, log=print):
+    """Cold-start log of the affiliate-link mode. Never logs a marker, project id or link."""
+    formats = partnerlinks.APPROVED_FORMATS if formats is None else formats
+    if mode == "disabled":
+        log("links: ERROR AFFILIATE_LINK_MODE=disabled (or unset); every reference-fare email will be blocked")
+    elif mode == "direct":
+        log("links: WARNING AFFILIATE_LINK_MODE=direct appends the marker to Aviasales URLs; Travelpayouts "
+            "recommends partner links and doesn't guarantee attribution for these (ticket #257588)")
+    elif not formats:
+        log("links: ERROR AFFILIATE_LINK_MODE=partner_api but no partner-link format is approved; "
+            "every reference-fare email will be blocked")
+
+
 def link_deps(env, log=print):
     """Search-link inputs (spec docs/m1.4-multi-platform-search-links.md). A bad bundled config or
     a missing/invalid TP_MARKER blocks reference-fare emails (service.render); the M1 template is
@@ -64,6 +81,13 @@ def link_deps(env, log=print):
             + "; reference-fare emails will be blocked (EMAIL_TEMPLATE=reference)")
         marker = None
     out["marker"] = marker
+    # TP_TRS: Travelpayouts project id, only for partner-link formats with a `trs` rule. Not a
+    # secret, but an account identifier: never logged; a malformed value is dropped (fail closed).
+    trs = (env.get("TP_TRS") or "").strip() or None
+    if trs is not None and not partnerlinks.TRS_RE.match(trs):
+        log("links: ERROR TP_TRS has an unexpected format; partner links requiring it will be rejected")
+        trs = None
+    out["partner_trs"] = trs
     return out
 
 

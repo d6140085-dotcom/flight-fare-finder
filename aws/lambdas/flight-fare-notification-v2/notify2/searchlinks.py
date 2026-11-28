@@ -71,6 +71,8 @@ class Link:
     role: str                 # primary | secondary | source | fallback_only
     affiliate: bool = False
     notice: str = None        # set on general-search-page (fallback) links
+    via: str = "direct"       # Aviasales only: "direct" (marker in the URL) or "partner_api" (a partner
+                              # link that passed notify2.partnerlinks; set only by service.search_links)
 
 
 @dataclass(frozen=True)
